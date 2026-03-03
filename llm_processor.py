@@ -26,6 +26,7 @@ ALLOWED_ACTIONS = {
     "scroll_to",       # Scroll element into viewport
     "hover",           # Hover over element (dropdowns, tooltips)
     "select",          # Choose option from <select> by value or label
+    "click_text",      # Click button/link by visible text — NO CSS selector needed
     # ── Assertions (Phase 3) ─────────────────────────────────────────────
     "check_url",       # Assert URL contains (or !not) a path fragment
     "check_text",      # Assert page/element text contains (or !not) a string
@@ -147,7 +148,10 @@ def _steps_to_script(steps: List[dict], test_data: dict) -> str:
         elif action == "wait_for_timeout":
             lines.append(f"await page.wait_for_timeout({value})")
         elif action == "check_url":
-            lines.append(f"assert {value!r} in page.url  # URL verification")
+            if value and value.startswith("!"):
+                lines.append(f"assert {value[1:]!r} not in page.url  # URL NOT present check")
+            else:
+                lines.append(f"assert {value!r} in page.url  # URL verification")
         # ── Phase 3 ──────────────────────────────────────────────────────
         elif action == "check_text":
             negate = value.startswith("!") if value else False
@@ -168,6 +172,8 @@ def _steps_to_script(steps: List[dict], test_data: dict) -> str:
             lines.append(f"await page.hover({selector!r})")
         elif action == "select":
             lines.append(f"await page.select_option({selector!r}, value={value!r})")
+        elif action == "click_text":
+            lines.append(f"await page.get_by_role('button', name={value!r}).click()  # text-based click")
         else:
             lines.append(f"# unknown action: {action}")
     return "\n".join(lines)
@@ -224,12 +230,17 @@ def _validate_steps(steps: list, title: str) -> List[TestStep]:
             "scroll_to", "hover", "select",
             # Phase 3 assertions (check_text is optional — defaults to body)
             "check_element", "check_attribute", "check_count",
+            # click_text is NOT here — it uses value (text), not selector
         }
         if action in SELECTOR_REQUIRED and not selector:
             raise ValueError(f"'{title}' step[{i}] action '{action}' requires a selector")
 
-        # check_attribute: value must contain "=" to split attribute name from expected value
+        # click_text requires a value (the text to find) — selector is not used
         raw_val = s.get("value") or ""
+        if action == "click_text" and not raw_val.strip():
+            raise ValueError(f"'{title}' step[{i}] action 'click_text' requires a value (the text to click)")
+
+        # check_attribute: value must contain "=" to split attribute name from expected value
         if action == "check_attribute" and "=" not in raw_val:
             logger.warning(
                 "'%s' step[%d]: check_attribute value '%s' missing '='. "
@@ -436,12 +447,19 @@ ALLOWED ACTIONS  (use ONLY these — any other action is rejected)
                        selector required; no value needed
   select             → choose option from a <select> element
                        selector = the <select>; value = option value or visible label text
+  click_text         → click a button or link by its VISIBLE TEXT LABEL
+                       value = the text to find  e.g. "Logout", "Sign Out", "Continue"
+                       NO selector needed — finds any button, link, or [role=button]
+                       ✅ USE THIS for Logout, navigation, and any button whose CSS
+                          selector you are not certain about
   wait_for_load_state→ wait for page load; value = "networkidle" (recommended)
   wait_for_timeout   → pause; value = milliseconds as string e.g. "2000"
 
 ── ASSERTIONS (Phase 3) ────────────────────────────────────────
   check_url          → assert current URL contains a path fragment
-                       value = "/dashboard"  (or prefix with "!" to assert NOT present)
+                       value = "/dashboard"          → URL must CONTAIN /dashboard
+                       value = "!/dashboard"         → URL must NOT contain /dashboard
+                       Prefix "!" = assert absence  (used for negative / error tests)
 
   check_text         → assert page or element text contains a string
                        selector = CSS selector (optional, defaults to body)
@@ -483,17 +501,24 @@ SELECTOR RULES — bad selectors are the #1 cause of test failures:
 POST-LOGIN NAVIGATION TESTS (logout, profile, settings):
   After login the user lands on a dashboard.
   - Use check_url to verify the dashboard URL first
-  - Only click elements using selectors you are CERTAIN exist
-  - If you are not sure of a selector, end the test with check_url or check_text
+  - For logout/nav buttons: ALWAYS use click_text with the button's visible label
+    e.g. {"action": "click_text", "value": "Logout"}
+         {"action": "click_text", "value": "Sign Out"}
+         {"action": "click_text", "value": "Log out"}
+  - NEVER guess aria-label values — they are app-specific and almost always wrong
+  - After logout: check_url "!/dashboard" (URL should no longer contain /dashboard)
+                  check_url "/auth"         (or whatever the login page path is)
 {variations_section}
 STRICT RULES — violations silently drop the test case:
 1. First step MUST be: {{"action": "goto", "value": "{{{{url}}}}"}}
 2. Use {username_selector} for username fills, {password_selector} for password fills
 3. NEVER use data-testid selectors
 4. NEVER use wait_for_selector for verification — use check_url or check_text
-5. For checkbox interactions, use the "check" action, not "click"
+5. For checkboxes: use the "check" action, NOT "click"
 6. For check_attribute, value MUST contain "=" e.g. "type=email"
-7. Maximum 10 steps per test case
+7. For logout/nav buttons: use click_text, NEVER guess aria-label values
+8. For negative URL tests: prefix value with "!" e.g. "!/dashboard"
+9. Maximum 10 steps per test case
 
 EXAMPLES:
 
@@ -501,25 +526,32 @@ Positive login test:
   goto → fill username({{{{username}}}}) → fill password({{{{password}}}}) → press Enter
   → wait_for_load_state → check_url "/dashboard" → check_text "Welcome"
 
-Negative login test (hardcoded invalid creds, NOT templates):
+Negative login test — URL check with "!" (user stays on auth page):
   goto → fill username("bad@test.com") → fill password("wrongpass") → press Enter
-  → wait_for_load_state → check_url "/auth" → check_text "Invalid credentials"
+  → wait_for_load_state → check_url "!/dashboard" → check_text "Invalid"
+  ← "!/dashboard" means: assert /dashboard is NOT in the current URL
+
+Logout test — use click_text, NOT aria-label guessing:
+  goto → fill → fill → press Enter → wait_for_load_state → check_url "/dashboard"
+  → click_text "Logout"  ← finds any button/link labelled "Logout", "Log out", "Sign Out"
+  → wait_for_load_state → check_url "!/dashboard" → check_url "/auth"
 
 Content / UI verification:
-  {{"action": "check_text",      "value": "Dashboard"}}         ← page contains "Dashboard"
-  {{"action": "check_text",      "value": "!Server Error"}}     ← page does NOT contain error
+  {{"action": "check_text",      "value": "Dashboard"}}           ← page contains "Dashboard"
+  {{"action": "check_text",      "value": "!Server Error"}}       ← page does NOT contain error
   {{"action": "check_element",   "selector": ".alert",    "value": "visible"}}
   {{"action": "check_element",   "selector": "#submit",   "value": "enabled"}}
   {{"action": "check_attribute", "selector": "input#email", "value": "type=email"}}
   {{"action": "check_count",     "selector": ".nav-item", "value": "5"}}
 
 Dropdown / scroll / hover:
-  {{"action": "scroll_to", "selector": "#signup-form"}}
-  {{"action": "hover",     "selector": "nav .dropdown"}}
-  {{"action": "select",    "selector": "select[name='country']", "value": "United States"}}
+  {{"action": "scroll_to",  "selector": "#signup-form"}}
+  {{"action": "hover",      "selector": "nav .dropdown"}}
+  {{"action": "select",     "selector": "select[name='country']", "value": "United States"}}
+  {{"action": "click_text", "value": "Continue"}}                 ← text-based nav click
 
 Checkbox test:
-  {{"action": "check", "selector": "input[name='rememberMe']"}}  ← use "check", not "click"
+  {{"action": "check", "selector": "input[name='rememberMe']"}}   ← use "check", not "click"
 
 Return ONLY this JSON, no markdown, no explanation:
 {{

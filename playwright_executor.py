@@ -21,6 +21,7 @@ ALLOWED_ACTIONS = {
     "scroll_to",     # Scroll element into viewport (lazy-loaded content, long pages)
     "hover",         # Hover to reveal dropdowns / tooltips
     "select",        # Choose option in <select> by value or visible label text
+    "click_text",    # Click a button/link by its VISIBLE TEXT — no CSS selector needed
     # ── Assertions (Phase 3) ─────────────────────────────────────────────
     "check_url",     # Assert current URL contains (or !not) a path fragment
     "check_text",    # Assert page/element text contains (or !not) a string
@@ -581,10 +582,24 @@ class PlaywrightExecutor:
                 await page.click(selector, timeout=timeout, force=step.force)
 
             elif action == "check":
-                # Dedicated checkbox/radio action — uses Playwright's built-in check()
-                # which scrolls into view and handles custom components better than click().
+                # Dedicated checkbox/radio action.
+                # Uses step.force=True to bypass Tailwind/custom overlay interception.
+                # If page.check() still fails (e.g. aria-hidden overlay), falls back to
+                # a direct JavaScript click on the underlying input element.
                 await page.wait_for_selector(selector, timeout=timeout)
-                await page.check(selector, timeout=timeout)
+                try:
+                    await page.check(selector, timeout=timeout, force=step.force)
+                except Exception as check_err:
+                    intercept_keywords = ("intercepts pointer events", "timeout", "TimeoutError")
+                    if any(kw.lower() in str(check_err).lower() for kw in intercept_keywords):
+                        logger.warning(
+                            "page.check() failed (%s: %s) — falling back to JS .click()",
+                            type(check_err).__name__, str(check_err)[:80],
+                        )
+                        # Direct JS click on the checkbox element, bypassing all overlays
+                        await page.locator(selector).evaluate("el => el.click()")
+                    else:
+                        raise
 
             elif action == "press":
                 key = value if value else "Enter"
@@ -606,13 +621,33 @@ class PlaywrightExecutor:
 
             elif action == "check_url":
                 # Reliable post-navigation verification — no DOM selectors needed.
+                # Prefix value with "!" to assert the pattern is NOT in the URL.
                 current_url = page.url
                 pattern = value or ""
-                if pattern and pattern not in current_url:
-                    raise AssertionError(
-                        f"URL check failed: expected '{pattern}' in current URL '{current_url}'"
-                    )
-                logger.info("check_url passed: '%s' found in '%s'", pattern, current_url)
+                if pattern:
+                    negate = pattern.startswith("!")
+                    check_pattern = pattern[1:] if negate else pattern
+                    found = check_pattern in current_url
+                    if negate:
+                        if found:
+                            raise AssertionError(
+                                f"URL check failed: expected '{check_pattern}' NOT in "
+                                f"current URL '{current_url}' but it was found"
+                            )
+                        logger.info(
+                            "check_url (absent) passed: '%s' not in '%s'",
+                            check_pattern, current_url,
+                        )
+                    else:
+                        if not found:
+                            raise AssertionError(
+                                f"URL check failed: expected '{check_pattern}' "
+                                f"in current URL '{current_url}'"
+                            )
+                        logger.info(
+                            "check_url passed: '%s' found in '%s'",
+                            check_pattern, current_url,
+                        )
 
             # ── Phase 3 assertions ────────────────────────────────────────
 
@@ -731,6 +766,54 @@ class PlaywrightExecutor:
                     # Fallback: try matching by visible label text
                     await page.select_option(selector, label=value, timeout=timeout)
                 logger.info("select: '%s' → option '%s'", selector, value)
+
+            elif action == "click_text":
+                # Click a button or link by its visible text content.
+                # This is the RECOMMENDED way to click logout, nav, and action buttons
+                # when you know the label but not the CSS selector.
+                # Tries: button role → link role → generic text → JS fallback.
+                text = value or ""
+                clicked = False
+                # 1. Try role=button with matching name
+                btn_loc = page.get_by_role("button", name=text, exact=False)
+                if await btn_loc.count():
+                    await btn_loc.first.wait_for(state="visible", timeout=timeout)
+                    await btn_loc.first.click(timeout=timeout)
+                    clicked = True
+                # 2. Try role=link with matching name
+                if not clicked:
+                    link_loc = page.get_by_role("link", name=text, exact=False)
+                    if await link_loc.count():
+                        await link_loc.first.wait_for(state="visible", timeout=timeout)
+                        await link_loc.first.click(timeout=timeout)
+                        clicked = True
+                # 3. Try any element that contains the text
+                if not clicked:
+                    text_loc = page.get_by_text(text, exact=False)
+                    if await text_loc.count():
+                        await text_loc.first.wait_for(state="visible", timeout=timeout)
+                        await text_loc.first.click(timeout=timeout)
+                        clicked = True
+                # 4. JS fallback — searches all interactive elements for matching text
+                if not clicked:
+                    found = await page.evaluate(
+                        """(text) => {
+                            const tags = ['button', 'a', '[role="button"]', '[role="link"]'];
+                            const els = [...document.querySelectorAll(tags.join(','))];
+                            const match = els.find(
+                                el => el.textContent.trim().toLowerCase().includes(text.toLowerCase())
+                            );
+                            if (match) { match.click(); return true; }
+                            return false;
+                        }""",
+                        text,
+                    )
+                    if not found:
+                        raise AssertionError(
+                            f"click_text failed: no visible button/link with text '{text}'"
+                        )
+                    clicked = True
+                logger.info("click_text: clicked element with text '%s'", text)
 
     @staticmethod
     def _resolve(template: str, data: Dict[str, Any]) -> str:
