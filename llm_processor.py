@@ -502,9 +502,9 @@ POST-LOGIN NAVIGATION TESTS (logout, profile, settings):
   After login the user lands on a dashboard.
   - Use check_url to verify the dashboard URL first
   - For logout/nav buttons: ALWAYS use click_text with the button's visible label
-    e.g. {"action": "click_text", "value": "Logout"}
-         {"action": "click_text", "value": "Sign Out"}
-         {"action": "click_text", "value": "Log out"}
+    e.g. {{"action": "click_text", "value": "Logout"}}
+         {{"action": "click_text", "value": "Sign Out"}}
+         {{"action": "click_text", "value": "Log out"}}
   - NEVER guess aria-label values — they are app-specific and almost always wrong
   - After logout: check_url "!/dashboard" (URL should no longer contain /dashboard)
                   check_url "/auth"         (or whatever the login page path is)
