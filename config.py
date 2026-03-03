@@ -1,26 +1,34 @@
 import os
 import logging
+import streamlit as st
 from dotenv import load_dotenv
 
+# Load local .env if present
 load_dotenv()
+
+def get_secret(key: str, default=None):
+    """Fetch secret from Streamlit Cloud or local .env."""
+    if key in st.secrets:   # Cloud deployment
+        return st.secrets[key]
+    return os.getenv(key, default)  # Local development
 
 
 class Config:
     # Claude API
-    CLAUDE_API_KEY = os.getenv("CLAUDE_API_KEY")
+    CLAUDE_API_KEY = get_secret("CLAUDE_API_KEY")
 
     # Azure Storage
-    AZURE_STORAGE_CONNECTION_STRING = os.getenv("AZURE_STORAGE_CONNECTION_STRING")
-    AZURE_CONTAINER_NAME = os.getenv("AZURE_CONTAINER_NAME", "test-evidence")
+    AZURE_STORAGE_CONNECTION_STRING = get_secret("AZURE_STORAGE_CONNECTION_STRING")
+    AZURE_CONTAINER_NAME = get_secret("AZURE_CONTAINER_NAME", "test-evidence")
 
     # Playwright
-    PLAYWRIGHT_TIMEOUT = int(os.getenv("PLAYWRIGHT_TIMEOUT", "30000"))
-    PLAYWRIGHT_HEADLESS = os.getenv("PLAYWRIGHT_HEADLESS", "false").lower() == "true"
+    PLAYWRIGHT_TIMEOUT = int(get_secret("PLAYWRIGHT_TIMEOUT", "30000"))
+    PLAYWRIGHT_HEADLESS = str(get_secret("PLAYWRIGHT_HEADLESS", "false")).lower() == "true"
 
     # Application
-    MAX_RETRIES = int(os.getenv("MAX_RETRIES", "3"))
-    SCREENSHOTS_DIR = os.getenv("SCREENSHOTS_DIR", "screenshots")
-    LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
+    MAX_RETRIES = int(get_secret("MAX_RETRIES", "3"))
+    SCREENSHOTS_DIR = get_secret("SCREENSHOTS_DIR", "screenshots")
+    LOG_LEVEL = get_secret("LOG_LEVEL", "INFO")
 
     @classmethod
     def validate(cls):
