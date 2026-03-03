@@ -1,0 +1,15 @@
+# Core dependencies
+anthropic==0.81.0
+playwright==1.58.0
+streamlit==1.54.0
+python-dotenv==1.2.1
+azure-storage-blob==12.28.0
+pandas==2.3.3
+
+# Document processing
+unstructured==0.20.2
+unstructured[pdf]==0.20.2
+unstructured[docx]==0.20.2
+
+# Image handling
+pillow==12.1.1

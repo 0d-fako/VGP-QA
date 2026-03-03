@@ -1,0 +1,33 @@
+Execution Error: Page.fill: Unexpected token "" while parsing css selector "". Did you mean to CSS.escape it?
+Call log:
+  - waiting for
+
+Traceback: Traceback (most recent call last):
+  File "C:\Users\DELL\Desktop\VGG\mcp\.kiro\specs\qa-test-agent\qa-test-agent\playwright_executor.py", line 69, in execute_test_case
+    await self._handle_authentication(page)
+  File "C:\Users\DELL\Desktop\VGG\mcp\.kiro\specs\qa-test-agent\qa-test-agent\playwright_executor.py", line 139, in _handle_authentication
+    await page.fill(self.config.credentials['username_selector'],
+                  self.config.credentials['username'])
+  File "C:\Users\DELL\Desktop\VGG\mcp\.kiro\specs\qa-test-agent\qa-test-agent\venv\Lib\site-packages\playwright\async_api\_generated.py", line 10140, in fill
+    await self._impl_obj.fill(
+    ...<6 lines>...
+    )
+  File "C:\Users\DELL\Desktop\VGG\mcp\.kiro\specs\qa-test-agent\qa-test-agent\venv\Lib\site-packages\playwright\_impl\_page.py", line 893, in fill
+    return await self._main_frame.fill(**locals_to_params(locals()))
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\DELL\Desktop\VGG\mcp\.kiro\specs\qa-test-agent\qa-test-agent\venv\Lib\site-packages\playwright\_impl\_frame.py", line 607, in fill
+    await self._fill(**locals_to_params(locals()))
+  File "C:\Users\DELL\Desktop\VGG\mcp\.kiro\specs\qa-test-agent\qa-test-agent\venv\Lib\site-packages\playwright\_impl\_frame.py", line 619, in _fill
+    await self._channel.send("fill", self._timeout, locals_to_params(locals()))
+  File "C:\Users\DELL\Desktop\VGG\mcp\.kiro\specs\qa-test-agent\qa-test-agent\venv\Lib\site-packages\playwright\_impl\_connection.py", line 69, in send
+    return await self._connection.wrap_api_call(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    ...<3 lines>...
+    )
+    ^
+  File "C:\Users\DELL\Desktop\VGG\mcp\.kiro\specs\qa-test-agent\qa-test-agent\venv\Lib\site-packages\playwright\_impl\_connection.py", line 559, in wrap_api_call
+    raise rewrite_error(error, f"{parsed_st['apiName']}: {error}") from None
+playwright._impl._errors.Error: Page.fill: Unexpected token "" while parsing css selector "". Did you mean to CSS.escape it?
+Call log:
+  - waiting for
+

@@ -1,0 +1,30 @@
+Execution Error: 
+Traceback: Traceback (most recent call last):
+  File "C:\Users\DELL\Desktop\VGG\mcp\.kiro\specs\qa-test-agent\qa-test-agent\playwright_executor.py", line 49, in execute_test_case
+    async with async_playwright() as p:
+               ~~~~~~~~~~~~~~~~^^
+  File "C:\Users\DELL\Desktop\VGG\mcp\.kiro\specs\qa-test-agent\qa-test-agent\venv\Lib\site-packages\playwright\async_api\_context_manager.py", line 46, in __aenter__
+    playwright = AsyncPlaywright(next(iter(done)).result())
+                                 ~~~~~~~~~~~~~~~~~~~~~~~^^
+  File "C:\Users\DELL\Desktop\VGG\mcp\.kiro\specs\qa-test-agent\qa-test-agent\venv\Lib\site-packages\playwright\_impl\_transport.py", line 120, in connect
+    self._proc = await asyncio.create_subprocess_exec(
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    ...<9 lines>...
+    )
+    ^
+  File "C:\Users\DELL\AppData\Local\Programs\Python\Python313\Lib\asyncio\subprocess.py", line 224, in create_subprocess_exec
+    transport, protocol = await loop.subprocess_exec(
+                          ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    ...<3 lines>...
+        stderr=stderr, **kwds)
+        ^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\DELL\AppData\Local\Programs\Python\Python313\Lib\asyncio\base_events.py", line 1788, in subprocess_exec
+    transport = await self._make_subprocess_transport(
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+        protocol, popen_args, False, stdin, stdout, stderr,
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+        bufsize, **kwargs)
+        ^^^^^^^^^^^^^^^^^^
+  File "C:\Users\DELL\AppData\Local\Programs\Python\Python313\Lib\asyncio\base_events.py", line 533, in _make_subprocess_transport
+    raise NotImplementedError
+NotImplementedError
