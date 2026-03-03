@@ -7,10 +7,13 @@ from dotenv import load_dotenv
 load_dotenv()
 
 def get_secret(key: str, default=None):
-    """Fetch secret from Streamlit Cloud or local .env."""
-    if key in st.secrets:   # Cloud deployment
-        return st.secrets[key]
-    return os.getenv(key, default)  # Local development
+    """Fetch secret from Streamlit Cloud secrets or local .env / environment."""
+    try:
+        if key in st.secrets:          # Streamlit Cloud deployment
+            return st.secrets[key]
+    except Exception:
+        pass                           # No secrets.toml on local dev — fall through
+    return os.getenv(key, default)     # Local development via .env
 
 
 class Config:

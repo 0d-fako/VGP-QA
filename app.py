@@ -1,5 +1,6 @@
 import sys
 import asyncio
+import subprocess
 if sys.platform == "win32":
     asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
 
@@ -18,6 +19,23 @@ from azure_storage import AzureStorageManager, LocalStorageManager
 configure_logging()
 
 st.set_page_config(page_title="QA Test Agent", page_icon="🧪", layout="wide")
+
+
+# ── Streamlit Cloud: install Playwright browser binary on first boot ────────
+# Streamlit Cloud only runs requirements.txt — the Dockerfile is ignored.
+# We must download the Chromium binary at runtime exactly once per deployment.
+@st.cache_resource(show_spinner="Installing browser — first run only, please wait…")
+def _install_playwright_browser():
+    result = subprocess.run(
+        [sys.executable, "-m", "playwright", "install", "chromium"],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        st.warning(f"⚠️ Browser install issue: {result.stderr[:300]}")
+    return result.returncode
+
+_install_playwright_browser()
 
 st.markdown("""
 <style>
