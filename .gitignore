@@ -1,3 +1,38 @@
+# Environment / secrets
 .env
 .env.local
 .env.example
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Virtual environments
+venv/
+.venv/
+env/
+ENV/
+
+# Test artifacts (generated at runtime)
+screenshots/
+test_evidence/
+
+# IDE / editor
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Qodo AI
+.qoder/
+.qodo/
+
+# OS
+.DS_Store
+Thumbs.db
