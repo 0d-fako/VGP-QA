@@ -26,6 +26,11 @@ An AI-powered automated testing solution that analyzes requirement documentation
 - Claude API key
 - (Optional) Azure Storage account
 
+### ⚠️ Current Status & Limitations (Beta)
+- **State Management**: Test case runs are currently held in-memory via Streamlit. If the application restarts, or the browser is refreshed mid-run, execution state is lost. 
+- **Concurrency**: The UI is blocking during execution. Running heavy tests (or multiple concurrent users running browsers via Playwright) will cause significant memory/CPU spikes.
+- **Security**: The Streamlit interface is entirely exposed by default. Authentication is needed for public deployments to prevent arbitrary automated requests (SSRF mitigation) and Claude API billing abuses.
+
 ## 🚀 Quick Start
 
 ### 1. Clone and Setup
@@ -167,12 +172,14 @@ az webapp create \
   --deployment-container-image-name yourregistry.azurecr.io/qa-test-agent
 ```
 
-## 🔒 Security Considerations
+## 🔒 Security & Deployment Best Practices
 
-- Never commit `.env` files to version control
-- Use environment variables for sensitive configuration
-- Validate and sanitize all user inputs
-- Implement proper authentication for production use
+### Pre-Deployment Checklist
+Before deploying this agent publicly, ensure the following constraints are handled:
+1. **Authentication**: The application acts as a browser-automation endpoint. You MUST place it behind a Cloudflare Zero Trust proxy, corporate VPN, or implement basic `st_auth` login on the `app.py` wrapper to secure it.
+2. **Resource Limits**: Headless browsers are memory hogs. Set a strict memory limit on your container (absolute minimum **2GB RAM, 1 vCPU**) to prevent `OOM` (Out-of-Memory) Container crashes during tests. 
+3. **Network Isolation**: Ensure the host server/VPC restricts the running container from accessing internal/metadata IPs (like 169.254.169.254) to eliminate SSRF attack vectors from malicious requirements uploads.
+4. **Secret Management**: Never commit `.env` files to version control. Prefer cloud-native secrets managers for `CLAUDE_API_KEY` and Azure connection strings.
 
 ## 📊 Sample Workflow
 

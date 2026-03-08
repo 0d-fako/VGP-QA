@@ -20,19 +20,17 @@ MODELS = [
 
 # Actions the executor accepts.  Used here to validate LLM output.
 ALLOWED_ACTIONS = {
-    # ── Navigation & interaction ──────────────────────────────────────────
     "goto", "fill", "click", "check", "press",
     "wait_for_selector", "wait_for_load_state", "wait_for_timeout",
-    "scroll_to",       # Scroll element into viewport
-    "hover",           # Hover over element (dropdowns, tooltips)
-    "select",          # Choose option from <select> by value or label
-    "click_text",      # Click button/link by visible text — NO CSS selector needed
-    # ── Assertions (Phase 3) ─────────────────────────────────────────────
-    "check_url",       # Assert URL contains (or !not) a path fragment
-    "check_text",      # Assert page/element text contains (or !not) a string
-    "check_element",   # Assert element state: visible|hidden|enabled|disabled|checked|unchecked
-    "check_attribute", # Assert element attribute: "attr=expected_value"
-    "check_count",     # Assert count of matching elements equals an integer
+    "scroll_to",       
+    "hover",           
+    "select",          
+    "click_text",      
+    "check_url",       
+    "check_text",      
+    "check_element",   
+    "check_attribute", 
+    "check_count",     
 }
 
 
@@ -50,6 +48,31 @@ def _call_claude(client: Anthropic, prompt: str, model_ref: list, max_tokens: in
             model_ref[0] = model
             logger.info("Model used: %s", model)
             return resp.content[0].text
+        except Exception as e:
+            if "not_found_error" in str(e) or "404" in str(e):
+                logger.warning("%s unavailable, trying next...", model)
+                continue
+            raise
+    raise RuntimeError("No available Claude model found.")
+
+
+def _call_claude_tool(client: Anthropic, prompt: str, tool_schema: dict, model_ref: list, max_tokens: int = 4096) -> dict:
+    """Use tool calling to guarantee structured output."""
+    for model in MODELS:
+        try:
+            resp = client.messages.create(
+                model=model,
+                max_tokens=max_tokens,
+                messages=[{"role": "user", "content": prompt}],
+                tools=[tool_schema],
+                tool_choice={"type": "tool", "name": tool_schema["name"]}
+            )
+            model_ref[0] = model
+            logger.info("Model used with tool: %s", model)
+            for block in resp.content:
+                if block.type == "tool_use" and block.name == tool_schema["name"]:
+                    return dict(block.input)
+            raise RuntimeError(f"Claude did not return the expected tool {tool_schema['name']}.")
         except Exception as e:
             if "not_found_error" in str(e) or "404" in str(e):
                 logger.warning("%s unavailable, trying next...", model)
@@ -342,8 +365,32 @@ Return ONLY a raw JSON object — no markdown, no explanation, no code fences.
         }}
     ]
 }}"""
-        text = _call_claude(self.client, prompt, self._model)
-        data = _parse_json(text)
+        tool_schema = {
+            "name": "return_requirements",
+            "description": "Returns the extracted requirements.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "requirements": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "title": {"type": "string", "description": "Short title"},
+                                "description": {"type": "string", "description": "What this requires"},
+                                "acceptance_criteria": {
+                                    "type": "array",
+                                    "items": {"type": "string"}
+                                }
+                            },
+                            "required": ["title", "description", "acceptance_criteria"]
+                        }
+                    }
+                },
+                "required": ["requirements"]
+            }
+        }
+        data = _call_claude_tool(self.client, prompt, tool_schema, self._model)
         reqs = [
             Requirement(
                 id="",
@@ -575,25 +622,65 @@ Return ONLY this JSON, no markdown, no explanation:
     ]
 }}"""
 
-        text = _call_claude(self.client, prompt, self._model, max_tokens=5000)
+        tool_schema = {
+            "name": "return_test_cases",
+            "description": "Returns generated test cases.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "test_cases": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "requirement_id": {"type": "string"},
+                                "title": {"type": "string"},
+                                "steps": {
+                                    "type": "array",
+                                    "items": {
+                                        "type": "object",
+                                        "properties": {
+                                            "action": {"type": "string"},
+                                            "selector": {"type": "string"},
+                                            "value": {"type": "string"},
+                                            "timeout": {"type": "integer"},
+                                            "force": {"type": "boolean"}
+                                        },
+                                        "required": ["action"]
+                                    }
+                                },
+                                "test_data": {"type": "object", "additionalProperties": True},
+                                "expected_results": {"type": "array", "items": {"type": "string"}},
+                                "variations": {
+                                    "type": "array",
+                                    "items": {
+                                        "type": "object",
+                                        "properties": {
+                                            "label": {"type": "string"},
+                                            "data": {"type": "object", "additionalProperties": True},
+                                            "expected_results": {"type": "array", "items": {"type": "string"}}
+                                        },
+                                        "required": ["label", "data", "expected_results"]
+                                    }
+                                }
+                            },
+                            "required": ["requirement_id", "title", "steps", "test_data", "expected_results"]
+                        }
+                    }
+                },
+                "required": ["test_cases"]
+            }
+        }
 
         try:
-            data = _parse_json(text)
-        except ValueError:
-            logger.warning("JSON parse failed, retrying with simplified prompt...")
+            data = _call_claude_tool(self.client, prompt, tool_schema, self._model, max_tokens=5000)
+        except Exception as e:
+            logger.warning("JSON parse failed, retrying with simplified prompt... Error: %s", e)
             fallback = (
                 f"Return JSON only — {len(requirements)} test cases for: {req_list}\n\n"
-                f'{{"test_cases": [{{"requirement_id": "REQ-001", "title": "Login test", '
-                f'"steps": [{{"action": "goto", "value": "{{{{url}}}}"}}, '
-                f'{{"action": "fill", "selector": "{username_selector}", "value": "{{{{username}}}}"}}, '
-                f'{{"action": "fill", "selector": "{password_selector}", "value": "{{{{password}}}}"}}, '
-                f'{{"action": "press", "selector": "{password_selector}", "value": "Enter"}}, '
-                f'{{"action": "wait_for_load_state", "value": "networkidle"}}], '
-                f'"test_data": {{"username": "test@example.com", "password": "Test123!"}}, '
-                f'"expected_results": ["passes"], "variations": []}}]}}'
+                f'Extract requirement_id, title, steps, test_data, expected_results, and variations.'
             )
-            text = _call_claude(self.client, fallback, self._model, max_tokens=3000)
-            data = _parse_json(text)
+            data = _call_claude_tool(self.client, fallback, tool_schema, self._model, max_tokens=3000)
 
         test_cases = []
         for tc in data.get("test_cases", []):
@@ -674,6 +761,20 @@ Return ONLY raw JSON — no markdown, no code fences:
     "explanation": "The dashboard page is displayed. Login was successful as shown by the welcome message."
 }}"""
 
+        tool_schema = {
+            "name": "return_vision_result",
+            "description": "Returns vision verification result.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "passed": {"type": "boolean"},
+                    "confidence": {"type": "number"},
+                    "explanation": {"type": "string"}
+                },
+                "required": ["passed", "confidence", "explanation"]
+            }
+        }
+
         for model in MODELS:
             try:
                 resp = self.client.messages.create(
@@ -693,9 +794,13 @@ Return ONLY raw JSON — no markdown, no code fences:
                             {"type": "text", "text": prompt},
                         ],
                     }],
+                    tools=[tool_schema],
+                    tool_choice={"type": "tool", "name": tool_schema["name"]}
                 )
-                result_text = resp.content[0].text
-                parsed = _parse_json(result_text)
+                parsed = {}
+                for block in resp.content:
+                    if block.type == "tool_use" and block.name == tool_schema["name"]:
+                        parsed = dict(block.input)
                 return {
                     "passed": bool(parsed.get("passed", True)),
                     "confidence": float(parsed.get("confidence", 1.0)),
@@ -764,9 +869,22 @@ Return ONLY raw JSON (no markdown, no code fences):
         report_id = f"REPORT-{__import__('uuid').uuid4().hex[:8].upper()}"
         generated_at = datetime.now()
 
+        tool_schema = {
+            "name": "return_report",
+            "description": "Returns QA test report.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "summary": {"type": "string"},
+                    "analysis": {"type": "string"},
+                    "recommendations": {"type": "array", "items": {"type": "string"}}
+                },
+                "required": ["summary", "analysis", "recommendations"]
+            }
+        }
+
         try:
-            text = _call_claude(self.client, prompt, self._model)
-            rd = _parse_json(text)
+            rd = _call_claude_tool(self.client, prompt, tool_schema, self._model)
             summary = rd.get("summary", f"{passed}/{total} tests passed ({pass_rate_str}%)")
             analysis = rd.get("analysis", "See detailed results.")
             recommendations = rd.get("recommendations", ["Review failed tests"])

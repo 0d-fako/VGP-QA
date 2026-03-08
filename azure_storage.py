@@ -191,10 +191,6 @@ class AzureStorageManager:
         evidence_map = {}
 
         try:
-            # Materialise the iterator into a list so it can be scanned
-            # once per execution_id without being exhausted after the first pass.
-            blobs = list(self.container_client.list_blobs())
-
             for execution_id in execution_ids:
                 execution_evidence = {
                     "screenshots": [],
@@ -202,18 +198,18 @@ class AzureStorageManager:
                     "reports": []
                 }
                 
-                for blob in blobs:
-                    blob_name = blob.name
-                    if execution_id in blob_name:
-                        blob_url = f"https://{self.blob_service_client.account_name}.blob.core.windows.net/{self.container_name}/{blob_name}"
-                        
-                        if "screenshots/" in blob_name:
-                            execution_evidence["screenshots"].append(blob_url)
-                        elif "logs/" in blob_name:
-                            execution_evidence["logs"].append(blob_url)
-                        elif "reports/" in blob_name:
-                            execution_evidence["reports"].append(blob_url)
-                
+                # Fetch screenshots for this execution
+                screenshot_blobs = self.container_client.list_blobs(name_starts_with=f"screenshots/{execution_id}")
+                for blob in screenshot_blobs:
+                    blob_url = f"https://{self.blob_service_client.account_name}.blob.core.windows.net/{self.container_name}/{blob.name}"
+                    execution_evidence["screenshots"].append(blob_url)
+                    
+                # Fetch logs for this execution
+                log_blobs = self.container_client.list_blobs(name_starts_with=f"logs/{execution_id}")
+                for blob in log_blobs:
+                    blob_url = f"https://{self.blob_service_client.account_name}.blob.core.windows.net/{self.container_name}/{blob.name}"
+                    execution_evidence["logs"].append(blob_url)
+                    
                 evidence_map[execution_id] = execution_evidence
                 
         except Exception as e:
