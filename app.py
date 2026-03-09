@@ -253,11 +253,18 @@ with tab1:
                     fpath = tmp.name
 
                 if f.name.endswith(".pdf"):
-                    from unstructured.partition.pdf import partition_pdf
-                    content = "\n".join(str(e) for e in partition_pdf(filename=fpath))
+                    import pdfplumber
+                    text_blocks = []
+                    with pdfplumber.open(fpath) as pdf:
+                        for page in pdf.pages:
+                            text = page.extract_text()
+                            if text:
+                                text_blocks.append(text)
+                    content = "\n".join(text_blocks)
                 elif f.name.endswith(".docx"):
-                    from unstructured.partition.docx import partition_docx
-                    content = "\n".join(str(e) for e in partition_docx(filename=fpath))
+                    import docx
+                    doc = docx.Document(fpath)
+                    content = "\n".join(para.text for para in doc.paragraphs)
                 else:
                     with open(fpath, encoding="utf-8") as fh:
                         content = fh.read()

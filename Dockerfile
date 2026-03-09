@@ -1,26 +1,35 @@
-# Use Python 3.11 slim image
-FROM python:3.11-slim
+# Use a Python slim image
+FROM python:3.11-slim as builder
 
-# Set working directory
 WORKDIR /app
-
-# Install base system utilities needed before pip
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    wget \
-    gnupg \
-    ca-certificates \
-    curl \
-    && rm -rf /var/lib/apt/lists/*
-
-# Copy requirements file
 COPY requirements.txt .
 
-# Install Python dependencies
-RUN pip install --no-cache-dir -r requirements.txt
+# Install build dependencies for unstructured/Playwright
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    gcc \
+    g++ \
+    libffi-dev \
+    && rm -rf /var/lib/apt/lists/*
 
-# Install Playwright + all Chromium system dependencies in one step
-# (playwright install --with-deps handles all OS packages automatically)
-RUN playwright install --with-deps chromium
+# Install Python packages to a virtual environment to copy over later
+RUN python -m venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
+
+RUN pip install --no-cache-dir --upgrade pip && \
+    pip install --no-cache-dir -r requirements.txt
+
+# Final stage
+FROM mcr.microsoft.com/playwright/python:v1.40.0-jammy
+
+WORKDIR /app
+
+# Copy the Python environment from the builder stage
+COPY --from=builder /opt/venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
+
+# Install only chromium (the microsoft image has the OS deps already)
+RUN playwright install chromium
+RUN playwright install-deps chromium
 
 # Copy application code
 COPY . .
