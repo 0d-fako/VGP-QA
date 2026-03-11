@@ -19,6 +19,8 @@ ENV/
 *.swp
 *.swo
 *~
+.claude/
+
 
 # Environment variables
 .env
