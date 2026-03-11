@@ -62,6 +62,7 @@ class TestExecution:
     screenshots: List[str]
     logs: List[str]
     error_message: Optional[str] = None
+    error_type: Optional[str] = None        # timeout | assertion | auth | selector | network | unknown
     execution_time: Optional[float] = None   # Set explicitly by executor after end_time is known
     attempts: int = 1                        # Phase 1: number of execution attempts (retry tracking)
     vision_verdict: Optional[Dict] = None   # Phase 1: {"passed": bool, "confidence": float, "explanation": str}

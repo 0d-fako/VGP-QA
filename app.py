@@ -8,12 +8,16 @@ import streamlit as st
 import os
 import tempfile
 from datetime import datetime
+from collections import defaultdict
+
+import pandas as pd
 
 from config import config, configure_logging
 from models import PlaywrightConfig
-from llm_processor import LLMProcessor
+from llm_processor import LLMProcessor, generate_csv_report, generate_junit_xml
 from playwright_executor import SyncPlaywrightExecutor, get_metrics, inspect_dom
 from azure_storage import AzureStorageManager, LocalStorageManager
+from db import DatabaseManager
 
 # Configure logging once at startup
 configure_logging()
@@ -55,12 +59,57 @@ defaults = {
     "report": None,
     "generating": False,
     "dom_snapshot": None,       # Phase 1: live app DOM inspection result
+    "db_run_id": None,          # PostgreSQL run ID for the active session
 }
 for k, v in defaults.items():
     if k not in st.session_state:
         st.session_state[k] = v
 
+# ── Module-level helpers ───────────────────────────────────────────────────
+# Defined here (not inside loops) so they are created exactly once.
+
+ASSERTION_ACTIONS = {
+    "check_url", "check_text", "check_element",
+    "check_attribute", "check_count",
+}
+
+
+def _render_error_message(ex) -> None:
+    """Display a contextual Streamlit message for a failed test execution."""
+    if not ex.error_message:
+        return
+    err_type = getattr(ex, "error_type", None)
+    if err_type == "auth" or "Authentication failed" in ex.error_message:
+        st.warning(
+            f"**Auth failure:** {ex.error_message}\n\n"
+            "Check the Login URL, username/password selectors, and credentials in the sidebar."
+        )
+    elif err_type == "assertion":
+        st.error(f"**Assertion failed:** {ex.error_message}")
+    elif err_type == "timeout":
+        st.error(f"**Timeout:** {ex.error_message}")
+    elif err_type == "selector":
+        st.error(f"**Selector not found:** {ex.error_message}")
+    elif err_type == "network":
+        st.error(f"**Network error:** {ex.error_message}")
+    else:
+        st.error(ex.error_message)
+
+
+@st.cache_resource(show_spinner=False)
+def _get_db():
+    """Return a cached DatabaseManager singleton, or None if not configured/reachable."""
+    if not DatabaseManager.is_configured():
+        return None
+    try:
+        return DatabaseManager()
+    except Exception:
+        return None
+
+
 # ── Init components ────────────────────────────────────────────────────────
+# db kept at module scope so sidebar can reference it even if init raises.
+db = None
 try:
     config.validate()
     llm = LLMProcessor()
@@ -69,6 +118,10 @@ try:
         if config.AZURE_STORAGE_CONNECTION_STRING
         else LocalStorageManager()
     )
+    # PostgreSQL history (optional — cached singleton; gracefully skipped if not configured)
+    db = _get_db()
+    if db is None and DatabaseManager.is_configured():
+        st.warning("⚠️ DB connection failed (history disabled).")
     st.session_state.ready = True
 except Exception as e:
     st.error(f"Initialisation error: {e}")
@@ -230,6 +283,47 @@ with st.sidebar:
             shared_session=shared_session,
         )
 
+    # ── Rate limit indicator ───────────────────────────────────────────────
+    st.subheader("📊 Session Usage")
+    used  = llm.api_call_count if st.session_state.ready else 0
+    cap   = config.MAX_API_CALLS_PER_SESSION
+    pct   = min(used / cap, 1.0) if cap else 0
+    st.progress(pct, text=f"API calls: {used} / {cap}")
+    if used >= cap:
+        st.error("⛔ Session API call limit reached. Refresh the page to reset.")
+    elif used >= cap * 0.8:
+        st.warning(f"⚠️ Approaching API call limit ({used}/{cap}).")
+
+    # ── DB History ────────────────────────────────────────────────────────
+    if db:
+        st.subheader("🗂️ Run History")
+        try:
+            history = db.list_runs(limit=10)
+            if not history:
+                st.caption("No saved runs yet.")
+            else:
+                for row in history:
+                    label = (
+                        f"{row['name']} — "
+                        f"{row['pass_rate']:.0f}% pass "
+                        f"({row['passed']}/{row['total']}) "
+                        f"· {row['created_at'].strftime('%m/%d %H:%M')}"
+                    )
+                    if st.button(f"↩ {label}", key=f"load_{row['id']}"):
+                        with st.spinner("Loading run…"):
+                            run_data = db.load_run(row["id"])
+                            st.session_state.requirements = run_data["requirements"]
+                            st.session_state.test_cases   = run_data["test_cases"]
+                            st.session_state.executions   = run_data["executions"]
+                            st.session_state.report       = (
+                                {"data": run_data["report"], "url": None}
+                                if run_data["report"] else None
+                            )
+                            st.session_state.db_run_id = row["id"]
+                            st.success(f"Loaded run: {row['name']}")
+        except Exception as db_hist_err:
+            st.caption(f"History error: {db_hist_err}")
+
 # ── Main ───────────────────────────────────────────────────────────────────
 st.title("🧪 QA Test Agent")
 st.caption("Automated testing powered by Claude AI and Playwright")
@@ -328,7 +422,10 @@ if st.session_state.requirements:
     elif base_url:
         st.caption("💡 Tip: Click **Inspect App DOM** in the sidebar to inject real selectors and reduce selector failures.")
 
-    if st.button("🧪 Generate Test Cases", type="primary", width='stretch'):
+    _limit_hit = llm.rate_limit_exceeded()
+    if _limit_hit:
+        st.error("⛔ Session API call limit reached. Refresh the page to generate more test cases.")
+    if st.button("🧪 Generate Test Cases", type="primary", width='stretch', disabled=_limit_hit):
         if not st.session_state.generating:
             st.session_state.generating = True
             with st.spinner("Generating..."):
@@ -372,14 +469,15 @@ if st.session_state.test_cases:
             if tc.steps:
                 step_rows = []
                 for i, s in enumerate(tc.steps, 1):
+                    kind = "🔍 Assert" if s.action in ASSERTION_ACTIONS else "▶ Action"
                     step_rows.append({
                         "#": i,
+                        "Type": kind,
                         "Action": s.action,
                         "Selector": s.selector or "—",
                         "Value": s.value or "—",
                         "Force": "✓" if s.force else "",
                     })
-                import pandas as pd
                 st.dataframe(pd.DataFrame(step_rows), width='stretch', hide_index=True)
             st.markdown("**Test data:**")
             st.json(tc.test_data)
@@ -454,6 +552,27 @@ if st.session_state.test_cases:
             total_ran = len(st.session_state.executions)
             st.success(f"Done — {total_ran} executions completed.")
 
+            # Persist to PostgreSQL if configured
+            if db:
+                try:
+                    run_name = f"{datetime.now().strftime('%Y-%m-%d %H:%M')} — {base_url}"
+                    if st.session_state.db_run_id:
+                        db.update_run(
+                            st.session_state.db_run_id,
+                            executions=st.session_state.executions,
+                        )
+                    else:
+                        run_id = db.save_run(
+                            name=run_name,
+                            requirements=st.session_state.requirements,
+                            test_cases=st.session_state.test_cases,
+                            executions=st.session_state.executions,
+                        )
+                        st.session_state.db_run_id = run_id
+                    st.info("💾 Results saved to database.")
+                except Exception as db_err:
+                    st.warning(f"DB save failed: {db_err}")
+
         if report_btn:
             with st.spinner("Generating report..."):
                 try:
@@ -466,6 +585,12 @@ if st.session_state.test_cases:
                         f"report_{datetime.now().strftime('%Y%m%d_%H%M%S')}",
                     )
                     st.session_state.report = {"data": report, "url": url}
+                    # Persist report to DB
+                    if db and st.session_state.db_run_id:
+                        try:
+                            db.update_run(st.session_state.db_run_id, report=report)
+                        except Exception as db_err:
+                            st.warning(f"⚠️ DB report save failed: {db_err}")
                     st.success("Report ready")
                 except Exception as e:
                     st.error(str(e))
@@ -489,7 +614,6 @@ if st.session_state.executions:
 
     if has_variations:
         # Phase 2: group by test_case_id
-        from collections import defaultdict
         groups: dict = defaultdict(list)
         for ex in st.session_state.executions:
             groups[ex.test_case_id].append(ex)
@@ -507,17 +631,12 @@ if st.session_state.executions:
                     t = f"{ex.execution_time:.2f}s" if ex.execution_time is not None else "N/A"
                     var_label = f" [{ex.variation_label}]" if ex.variation_label else ""
                     retry_note = f" (attempt {ex.attempts})" if ex.attempts > 1 else ""
+                    err_type = getattr(ex, "error_type", None)
+                    err_badge = f" `{err_type}`" if err_type else ""
                     st.markdown(
-                        f"{icon} **{ex.status.upper()}**{var_label}{retry_note} — {t}"
+                        f"{icon} **{ex.status.upper()}**{var_label}{retry_note}{err_badge} — {t}"
                     )
-                    if ex.error_message:
-                        if "Authentication failed" in ex.error_message:
-                            st.warning(
-                                f"**Auth failure:** {ex.error_message}\n\n"
-                                "Check the Login URL, selectors, and credentials in the sidebar."
-                            )
-                        else:
-                            st.error(ex.error_message)
+                    _render_error_message(ex)
                     # Phase 1: vision verdict
                     vv = getattr(ex, "vision_verdict", None)
                     if vv:
@@ -537,15 +656,10 @@ if st.session_state.executions:
             icon = "✅" if ex.status == "passed" else "❌" if ex.status == "failed" else "⚠️"
             t = f"{ex.execution_time:.2f}s" if ex.execution_time is not None else "N/A"
             retry_note = f" · attempt {ex.attempts}" if ex.attempts > 1 else ""
-            with st.expander(f"{icon} {ex.test_case_id} — {ex.status.upper()} ({t}){retry_note}"):
-                if ex.error_message:
-                    if "Authentication failed" in ex.error_message:
-                        st.warning(
-                            f"**Auth failure:** {ex.error_message}\n\n"
-                            "Check the Login URL, username/password selectors, and credentials in the sidebar."
-                        )
-                    else:
-                        st.error(ex.error_message)
+            err_type = getattr(ex, "error_type", None)
+            err_badge = f" [{err_type}]" if err_type else ""
+            with st.expander(f"{icon} {ex.test_case_id} — {ex.status.upper()}{err_badge} ({t}){retry_note}"):
+                _render_error_message(ex)
 
                 # Phase 1: vision verdict
                 vv = getattr(ex, "vision_verdict", None)
@@ -580,13 +694,40 @@ if st.session_state.report:
     st.subheader("Recommendations")
     for r in report.recommendations:
         st.markdown(f"• {r}")
-    st.download_button(
-        "💾 Download Report",
-        report.html_content,
-        file_name=f"report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.html",
-        mime="text/html",
-        width='stretch',
-    )
+    ts = datetime.now().strftime('%Y%m%d_%H%M%S')
+    dl1, dl2, dl3 = st.columns(3)
+    with dl1:
+        st.download_button(
+            "💾 Download HTML",
+            report.html_content,
+            file_name=f"report_{ts}.html",
+            mime="text/html",
+            width='stretch',
+        )
+    with dl2:
+        csv_data = generate_csv_report(
+            st.session_state.executions,
+            st.session_state.test_cases,
+        )
+        st.download_button(
+            "📊 Download CSV",
+            csv_data,
+            file_name=f"report_{ts}.csv",
+            mime="text/csv",
+            width='stretch',
+        )
+    with dl3:
+        xml_data = generate_junit_xml(
+            st.session_state.executions,
+            st.session_state.test_cases,
+        )
+        st.download_button(
+            "🔖 Download JUnit XML",
+            xml_data,
+            file_name=f"report_{ts}.xml",
+            mime="application/xml",
+            width='stretch',
+        )
 
 st.markdown("---")
 st.caption("Built with ❤️ by VG Platform")

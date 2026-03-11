@@ -1,9 +1,12 @@
+import csv
+import io
 import json
 import re
 import base64
 import logging
 from datetime import datetime
 from typing import List, Dict, Any, Optional
+from xml.etree import ElementTree as ET
 
 from anthropic import Anthropic
 from config import config
@@ -344,6 +347,27 @@ class LLMProcessor:
         config.validate()
         self.client = Anthropic(api_key=config.CLAUDE_API_KEY)
         self._model = [MODELS[0]]
+        # Rate limiting: track API calls this session
+        self._api_call_count = 0
+
+    def _track_call(self, label: str = ""):
+        """Increment call counter and warn when approaching the session cap."""
+        self._api_call_count += 1
+        cap = config.MAX_API_CALLS_PER_SESSION
+        logger.info("API call #%d/%d%s", self._api_call_count, cap, f" [{label}]" if label else "")
+        if self._api_call_count >= cap:
+            logger.warning(
+                "Session API call limit reached (%d/%d). "
+                "Consider splitting the session to control costs.",
+                self._api_call_count, cap,
+            )
+
+    @property
+    def api_call_count(self) -> int:
+        return self._api_call_count
+
+    def rate_limit_exceeded(self) -> bool:
+        return self._api_call_count >= config.MAX_API_CALLS_PER_SESSION
 
     # ── Requirements analysis ──────────────────────────────────────────────
 
@@ -390,6 +414,7 @@ Return ONLY a raw JSON object — no markdown, no explanation, no code fences.
                 "required": ["requirements"]
             }
         }
+        self._track_call("analyze_requirements")
         data = _call_claude_tool(self.client, prompt, tool_schema, self._model)
         reqs = [
             Requirement(
@@ -401,6 +426,13 @@ Return ONLY a raw JSON object — no markdown, no explanation, no code fences.
             )
             for r in data.get("requirements", [])
         ]
+        # Enforce MAX_REQUIREMENTS cap
+        if len(reqs) > config.MAX_REQUIREMENTS:
+            logger.warning(
+                "Capping requirements from %d → %d (MAX_REQUIREMENTS=%d)",
+                len(reqs), config.MAX_REQUIREMENTS, config.MAX_REQUIREMENTS,
+            )
+            reqs = reqs[: config.MAX_REQUIREMENTS]
         logger.info("Extracted %d requirements", len(reqs))
         return reqs
 
@@ -672,10 +704,12 @@ Return ONLY this JSON, no markdown, no explanation:
             }
         }
 
+        self._track_call("generate_test_cases")
         try:
             data = _call_claude_tool(self.client, prompt, tool_schema, self._model, max_tokens=5000)
         except Exception as e:
             logger.warning("JSON parse failed, retrying with simplified prompt... Error: %s", e)
+            self._track_call("generate_test_cases_fallback")
             fallback = (
                 f"Return JSON only — {len(requirements)} test cases for: {req_list}\n\n"
                 f'Extract requirement_id, title, steps, test_data, expected_results, and variations.'
@@ -734,6 +768,7 @@ Return ONLY this JSON, no markdown, no explanation:
                 "explanation": str    — what was observed
             }
         """
+        self._track_call("analyze_screenshot")
         try:
             with open(screenshot_path, "rb") as f:
                 image_data = base64.standard_b64encode(f.read()).decode("utf-8")
@@ -831,11 +866,16 @@ Return ONLY raw JSON — no markdown, no code fences:
         requirements: List[Requirement],
     ) -> TestReport:
         logger.info("Generating test report...")
-        total = len(executions)
-        passed = sum(1 for e in executions if e.status == "passed")
-        failed = sum(1 for e in executions if e.status == "failed")
-        errors = sum(1 for e in executions if e.status == "error")
-        pass_rate = (passed / total * 100) if total else 0
+        self._track_call("generate_test_report")
+
+        # Reuse get_metrics so we never duplicate the status-counting logic
+        from playwright_executor import get_metrics
+        m         = get_metrics(executions)
+        total     = m["total_executions"]
+        passed    = m["passed"]
+        failed    = m["failed"]
+        errors    = m["errors"]
+        pass_rate = m["pass_rate"]
 
         lines = []
         for e in executions:
@@ -843,14 +883,14 @@ Return ONLY raw JSON — no markdown, no code fences:
             line = f"- {e.test_case_id}: {e.status} ({t})"
             if e.error_message:
                 line += f" | {e.error_message[:80]}"
-            if getattr(e, "variation_label", None):
+            if e.variation_label:
                 line += f" [variation: {e.variation_label}]"
-            if getattr(e, "vision_verdict", None):
+            if e.vision_verdict:
                 vv = e.vision_verdict
                 line += f" [vision: {'✓' if vv.get('passed') else '✗'} conf={vv.get('confidence', 0):.2f}]"
             lines.append(line)
 
-        results_text = "\n".join(lines)
+        results_text  = "\n".join(lines)
         pass_rate_str = f"{pass_rate:.1f}"
 
         prompt = f"""Write a QA test report for these execution results.
@@ -866,7 +906,7 @@ Return ONLY raw JSON (no markdown, no code fences):
     "recommendations": ["Actionable recommendation 1", "Actionable recommendation 2"]
 }}"""
 
-        report_id = f"REPORT-{__import__('uuid').uuid4().hex[:8].upper()}"
+        report_id    = f"REPORT-{__import__('uuid').uuid4().hex[:8].upper()}"
         generated_at = datetime.now()
 
         tool_schema = {
@@ -885,21 +925,21 @@ Return ONLY raw JSON (no markdown, no code fences):
 
         try:
             rd = _call_claude_tool(self.client, prompt, tool_schema, self._model)
-            summary = rd.get("summary", f"{passed}/{total} tests passed ({pass_rate_str}%)")
-            analysis = rd.get("analysis", "See detailed results.")
+            summary         = rd.get("summary", f"{passed}/{total} tests passed ({pass_rate_str}%)")
+            analysis        = rd.get("analysis", "See detailed results.")
             recommendations = rd.get("recommendations", ["Review failed tests"])
         except Exception as e:
             logger.error("Report generation LLM call failed: %s", e)
-            summary = f"{passed}/{total} tests passed ({pass_rate_str}%)"
-            analysis = "Report generation encountered an error. Review execution logs."
+            summary         = f"{passed}/{total} tests passed ({pass_rate_str}%)"
+            analysis        = "Report generation encountered an error. Review execution logs."
             recommendations = ["Review failed tests", "Check selectors match the target application"]
 
         metrics = {
             "total_tests": total,
-            "passed": passed,
-            "failed": failed,
-            "errors": errors,
-            "pass_rate": pass_rate,
+            "passed":      passed,
+            "failed":      failed,
+            "errors":      errors,
+            "pass_rate":   pass_rate,
         }
 
         html_content = _build_html_report(
@@ -916,6 +956,113 @@ Return ONLY raw JSON (no markdown, no code fences):
             recommendations=recommendations,
             html_content=html_content,
         )
+
+
+# ── CSV / JUnit XML export ──────────────────────────────────────────────────
+
+def _tc_lookup(test_cases: Optional[List[TestCase]]) -> Dict[str, "TestCase"]:
+    """Build a {tc.id: tc} dict — shared by both exporters to avoid duplication."""
+    return {tc.id: tc for tc in test_cases} if test_cases else {}
+
+
+def generate_csv_report(executions: list, test_cases: Optional[List[TestCase]] = None) -> str:
+    """
+    Return a UTF-8 CSV string with one row per execution.
+
+    Columns:
+        execution_id, test_case_id, test_title, status, error_type,
+        execution_time_s, attempts, variation_label, vision_passed,
+        vision_confidence, error_message
+    """
+    tc_map = _tc_lookup(test_cases)
+    output = io.StringIO()
+    writer = csv.writer(output, lineterminator="\n")
+    writer.writerow([
+        "execution_id", "test_case_id", "test_title", "status",
+        "error_type", "execution_time_s", "attempts",
+        "variation_label", "vision_passed", "vision_confidence",
+        "error_message",
+    ])
+    for e in executions:
+        vv = e.vision_verdict or {}
+        tc = tc_map.get(e.test_case_id)
+        writer.writerow([
+            e.id,
+            e.test_case_id,
+            tc.title if tc else "",
+            e.status,
+            e.error_type or "",
+            f"{e.execution_time:.3f}" if e.execution_time is not None else "",
+            e.attempts,
+            e.variation_label or "",
+            str(vv.get("passed", "")).lower() if vv else "",
+            f"{vv.get('confidence', 0):.2f}" if vv else "",
+            (e.error_message or "").replace("\n", " ")[:200],
+        ])
+    return output.getvalue()
+
+
+def generate_junit_xml(
+    executions: list,
+    test_cases: Optional[List[TestCase]] = None,
+    suite_name: str = "QA Test Agent",
+) -> str:
+    """
+    Return a JUnit-compatible XML string (Surefire / Jenkins / GitHub Actions).
+
+    Each TestExecution becomes a <testcase>.  Failures and errors emit the
+    appropriate child element so CI systems can parse and annotate PRs.
+    """
+    tc_map     = _tc_lookup(test_cases)
+    total_time = sum(e.execution_time or 0 for e in executions)
+    failures   = sum(1 for e in executions if e.status == "failed")
+    errors     = sum(1 for e in executions if e.status == "error")
+
+    suite = ET.Element("testsuite", attrib={
+        "name":      suite_name,
+        "tests":     str(len(executions)),
+        "failures":  str(failures),
+        "errors":    str(errors),
+        "time":      f"{total_time:.3f}",
+        "timestamp": datetime.now().isoformat(),
+    })
+
+    for e in executions:
+        tc   = tc_map.get(e.test_case_id)
+        name = tc.title if tc else e.test_case_id
+        if e.variation_label:
+            name = f"{name} [{e.variation_label}]"
+
+        tc_el = ET.SubElement(suite, "testcase", attrib={
+            "name":      name,
+            "classname": e.test_case_id,
+            "time":      f"{e.execution_time:.3f}" if e.execution_time else "0",
+        })
+
+        err_type = e.error_type or "unknown"
+        if e.status == "failed":
+            failure = ET.SubElement(tc_el, "failure", attrib={
+                "message": (e.error_message or "Test failed")[:120],
+                "type":    err_type,
+            })
+            failure.text = e.error_message or ""
+        elif e.status == "error":
+            error_el = ET.SubElement(tc_el, "error", attrib={
+                "message": (e.error_message or "Execution error")[:120],
+                "type":    err_type,
+            })
+            error_el.text = e.error_message or ""
+
+        # Attach last 20 log lines as <system-out> to keep XML compact
+        if e.logs:
+            sysout = ET.SubElement(tc_el, "system-out")
+            sysout.text = "\n".join(e.logs[-20:])
+
+    # encoding="unicode" requires a text (StringIO) stream, not BytesIO
+    ET.indent(suite, space="  ")
+    buf = io.StringIO()
+    ET.ElementTree(suite).write(buf, encoding="unicode", xml_declaration=True)
+    return buf.getvalue()
 
 
 # ── HTML report builder ─────────────────────────────────────────────────────
@@ -953,9 +1100,24 @@ def _build_html_report(
         attempts = getattr(e, "attempts", 1)
         attempt_note = f" <small>(attempt {attempts})</small>" if attempts > 1 else ""
 
+        # Error type badge
+        err_type = getattr(e, "error_type", None)
+        err_type_badge = ""
+        if err_type:
+            badge_colours = {
+                "timeout": "#fd7e14", "assertion": "#dc3545",
+                "auth": "#6f42c1",    "selector": "#e83e8c",
+                "network": "#17a2b8", "unknown": "#6c757d",
+            }
+            bc = badge_colours.get(err_type, "#6c757d")
+            err_type_badge = (
+                f' <span style="background:{bc};color:#fff;font-size:10px;'
+                f'padding:2px 6px;border-radius:3px;">{err_type}</span>'
+            )
+
         rows.append(
             f"<tr><td>{e.test_case_id}{variation_cell}</td>"
-            f'<td style="color:{colour};font-weight:bold">{e.status.upper()}{attempt_note}</td>'
+            f'<td style="color:{colour};font-weight:bold">{e.status.upper()}{attempt_note}{err_type_badge}</td>'
             f"<td>{t}</td>"
             f"<td>{err}{vision_cell}</td></tr>"
         )

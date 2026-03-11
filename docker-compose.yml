@@ -1,0 +1,66 @@
+version: "3.9"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# docker-compose.yml — Local development & Azure Container Apps / ACI
+#
+# Usage (local):
+#   cp .env.example .env    # fill in CLAUDE_API_KEY, DATABASE_URL, etc.
+#   docker compose up --build
+#   open http://localhost:8501
+#
+# Usage (Azure Container Instances — quick deploy):
+#   az container create \
+#     --resource-group <rg> \
+#     --file docker-compose.yml \
+#     --environment-variables $(cat .env | xargs)
+# ─────────────────────────────────────────────────────────────────────────────
+
+services:
+  qa-agent:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: qa-test-agent:latest
+    container_name: qa-test-agent
+    restart: unless-stopped
+    ports:
+      - "8501:8501"
+    environment:
+      # ── Required ──────────────────────────────────────────────────────────
+      - CLAUDE_API_KEY=${CLAUDE_API_KEY}
+      - DATABASE_URL=${DATABASE_URL}
+      # ── Azure Storage (optional — uses local storage if empty) ────────────
+      - AZURE_STORAGE_CONNECTION_STRING=${AZURE_STORAGE_CONNECTION_STRING:-}
+      - AZURE_CONTAINER_NAME=${AZURE_CONTAINER_NAME:-test-evidence}
+      # ── Playwright ────────────────────────────────────────────────────────
+      - PLAYWRIGHT_HEADLESS=true
+      - PLAYWRIGHT_TIMEOUT=${PLAYWRIGHT_TIMEOUT:-30000}
+      - MAX_RETRIES=${MAX_RETRIES:-3}
+      # ── Rate limiting ─────────────────────────────────────────────────────
+      - MAX_REQUIREMENTS=${MAX_REQUIREMENTS:-20}
+      - MAX_TEST_CASES=${MAX_TEST_CASES:-10}
+      - MAX_API_CALLS_PER_SESSION=${MAX_API_CALLS_PER_SESSION:-50}
+      # ── Logging ───────────────────────────────────────────────────────────
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - SCREENSHOTS_DIR=/app/screenshots
+    volumes:
+      # Persist screenshots and local evidence between restarts
+      - qa_screenshots:/app/screenshots
+      - qa_evidence:/app/test_evidence
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8501/_stcore/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+          cpus: "1.5"
+        reservations:
+          memory: 512M
+
+volumes:
+  qa_screenshots:
+  qa_evidence:

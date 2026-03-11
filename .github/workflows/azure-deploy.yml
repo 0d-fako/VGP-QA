@@ -1,0 +1,95 @@
+name: Build & Deploy to Azure
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# ── Required GitHub secrets ─────────────────────────────────────────────────
+# AZURE_CREDENTIALS      — output of: az ad sp create-for-rbac --sdk-auth
+# ACR_LOGIN_SERVER       — e.g. myregistry.azurecr.io
+# ACR_USERNAME           — ACR admin username (or use managed identity)
+# ACR_PASSWORD           — ACR admin password
+# AZURE_RESOURCE_GROUP   — target resource group
+# AZURE_APP_SERVICE_NAME — name of the App Service (from bicep output)
+# CLAUDE_API_KEY         — Anthropic API key (for deployment env)
+# DATABASE_URL           — PostgreSQL connection string
+
+env:
+  IMAGE_NAME: qa-test-agent
+  IMAGE_TAG:  ${{ github.sha }}
+
+jobs:
+  build-and-push:
+    name: Build & Push to ACR
+    runs-on: ubuntu-latest
+    outputs:
+      image: ${{ steps.meta.outputs.image }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Log in to ACR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ secrets.ACR_LOGIN_SERVER }}
+          username: ${{ secrets.ACR_USERNAME }}
+          password: ${{ secrets.ACR_PASSWORD }}
+
+      - name: Build and push image
+        id: meta
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: |
+            ${{ secrets.ACR_LOGIN_SERVER }}/${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}
+            ${{ secrets.ACR_LOGIN_SERVER }}/${{ env.IMAGE_NAME }}:latest
+          cache-from: type=registry,ref=${{ secrets.ACR_LOGIN_SERVER }}/${{ env.IMAGE_NAME }}:latest
+          cache-to: type=inline
+
+  deploy:
+    name: Deploy to Azure App Service
+    runs-on: ubuntu-latest
+    needs: build-and-push
+    environment: production
+
+    steps:
+      - name: Checkout (for Bicep template)
+        uses: actions/checkout@v4
+
+      - name: Azure login
+        uses: azure/login@v1
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Deploy Bicep infrastructure
+        uses: azure/arm-deploy@v1
+        with:
+          resourceGroupName: ${{ secrets.AZURE_RESOURCE_GROUP }}
+          template: ./azure-deploy.bicep
+          parameters: >
+            acrName=${{ secrets.ACR_LOGIN_SERVER }}
+            imageTag=${{ env.IMAGE_TAG }}
+            claudeApiKey=${{ secrets.CLAUDE_API_KEY }}
+            databaseUrl=${{ secrets.DATABASE_URL }}
+          failOnStdErr: false
+
+      - name: Restart App Service to pull new image
+        run: |
+          az webapp restart \
+            --resource-group ${{ secrets.AZURE_RESOURCE_GROUP }} \
+            --name ${{ secrets.AZURE_APP_SERVICE_NAME }}
+
+      - name: Health check
+        run: |
+          echo "Waiting for app to start…"
+          sleep 30
+          APP_URL=$(az webapp show \
+            --resource-group ${{ secrets.AZURE_RESOURCE_GROUP }} \
+            --name ${{ secrets.AZURE_APP_SERVICE_NAME }} \
+            --query defaultHostName -o tsv)
+          curl -f "https://${APP_URL}/_stcore/health" \
+            --retry 5 --retry-delay 10 \
+            || echo "Health check failed — check App Service logs"

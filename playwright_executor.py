@@ -31,6 +31,34 @@ ALLOWED_ACTIONS = {
 }
 
 
+def _categorize_error(err: Exception) -> str:
+    """
+    Map a raw exception to one of six human-readable error categories.
+
+    Categories (used in UI badges and DB analytics):
+        timeout   — Playwright timed out waiting for a selector or page load
+        assertion — A check_* step's condition was not met
+        auth      — Login/authentication step failed
+        selector  — Element could not be found (not a timeout)
+        network   — DNS / connection-level failure
+        unknown   — Anything else
+    """
+    err_str   = str(err)
+    err_type  = type(err).__name__
+
+    if "timeout" in err_str.lower() or "TimeoutError" in err_type:
+        return "timeout"
+    if isinstance(err, AssertionError) or "check_" in err_str or "check failed" in err_str.lower():
+        return "assertion"
+    if "Authentication failed" in err_str or "auth" in err_str.lower():
+        return "auth"
+    if any(k in err_str.lower() for k in ("ERR_NAME_NOT_RESOLVED", "net::ERR", "connection refused", "ECONNREFUSED")):
+        return "network"
+    if any(k in err_str.lower() for k in ("selector", "element", "locator", "not found", "no element")):
+        return "selector"
+    return "unknown"
+
+
 def get_metrics(executions: List[TestExecution]) -> dict:
     """Pure function — no Playwright instance needed."""
     total = len(executions)
@@ -267,6 +295,7 @@ class PlaywrightExecutor:
                                 logger.error(msg)
                                 execution.status = "error"
                                 execution.error_message = msg
+                                execution.error_type = "auth"
                                 await self._screenshot(page, execution, "auth_failure")
                                 return execution  # Auth failures don't benefit from retrying
 
@@ -297,6 +326,7 @@ class PlaywrightExecutor:
                             else:
                                 execution.status = "failed"
                                 execution.error_message = err_str
+                                execution.error_type = _categorize_error(step_err)
                                 logger.error("Test failed: %s", step_err)
                                 await self._screenshot(page, execution, "failure")
 
@@ -314,6 +344,7 @@ class PlaywrightExecutor:
                 else:
                     execution.status = "error"
                     execution.error_message = str(e)
+                    execution.error_type = _categorize_error(e)
                     logger.error("Execution error: %s\n%s", e, traceback.format_exc())
 
             # Stop retrying once we have a conclusive result
@@ -324,6 +355,7 @@ class PlaywrightExecutor:
         if execution.status == "running":
             execution.status = "failed"
             execution.error_message = last_error or "Max retries exceeded"
+            execution.error_type = "timeout"
 
         # Vision verification on the final screenshot (Phase 1)
         if vision_fn and execution.screenshots and execution.status != "error":
