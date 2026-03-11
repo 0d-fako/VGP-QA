@@ -18,6 +18,8 @@ venv/
 .venv/
 env/
 ENV/
+.claude/
+.kiro/
 
 # Test artifacts (generated at runtime)
 screenshots/
