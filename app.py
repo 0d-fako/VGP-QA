@@ -97,6 +97,14 @@ def _render_error_message(ex) -> None:
 
 
 @st.cache_resource(show_spinner=False)
+def _get_storage():
+    """Return a cached storage backend — initialised once per app process."""
+    if config.AZURE_STORAGE_CONNECTION_STRING:
+        return AzureStorageManager()
+    return LocalStorageManager()
+
+
+@st.cache_resource(show_spinner=False)
 def _get_db():
     """Return a cached DatabaseManager singleton, or None if not configured/reachable."""
     if not DatabaseManager.is_configured():
@@ -113,11 +121,7 @@ db = None
 try:
     config.validate()
     llm = LLMProcessor()
-    storage = (
-        AzureStorageManager()
-        if config.AZURE_STORAGE_CONNECTION_STRING
-        else LocalStorageManager()
-    )
+    storage = _get_storage()
     # PostgreSQL history (optional — cached singleton; gracefully skipped if not configured)
     db = _get_db()
     if db is None and DatabaseManager.is_configured():

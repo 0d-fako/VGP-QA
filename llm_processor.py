@@ -15,11 +15,21 @@ from models import Requirement, TestCase, TestStep, TestReport
 logger = logging.getLogger(__name__)
 
 
-MODELS = [
-    "claude-sonnet-4-6",
-    "claude-3-5-haiku-20241022",
-    "claude-3-haiku-20240307",
-]
+# Primary model is configurable via CLAUDE_MODEL env var.
+# Falls back through cheaper/faster models if the primary is unavailable.
+# claude-3-haiku-20240307 is DEPRECATED (retiring 2026-04-19) — removed.
+def _build_model_list() -> list[str]:
+    from config import get_secret
+    primary = get_secret("CLAUDE_MODEL", "claude-haiku-4-5")
+    fallbacks = [
+        "claude-haiku-4-5",
+        "claude-3-5-haiku-20241022",
+    ]
+    # Put primary first, then append fallbacks that aren't already there
+    chain = [primary] + [m for m in fallbacks if m != primary]
+    return chain
+
+MODELS = _build_model_list()
 
 # Actions the executor accepts.  Used here to validate LLM output.
 ALLOWED_ACTIONS = {
@@ -39,8 +49,23 @@ ALLOWED_ACTIONS = {
 
 # ── Internal helpers ────────────────────────────────────────────────────────
 
+def _is_model_unavailable(exc: Exception) -> bool:
+    """
+    Return True when the exception indicates a model should be skipped and the
+    next one tried.  Catches both 404 not-found and 400 invalid_request_error
+    so that tier/access restrictions fall through to cheaper fallback models.
+    """
+    s = str(exc).lower()
+    return any(k in s for k in (
+        "not_found_error", "404",
+        "invalid_request_error", "400",
+        "model_not_found", "model not found",
+    ))
+
+
 def _call_claude(client: Anthropic, prompt: str, model_ref: list, max_tokens: int = 4096) -> str:
     """Try models in order; return text from the first that responds."""
+    last_exc: Exception | None = None
     for model in MODELS:
         try:
             resp = client.messages.create(
@@ -52,15 +77,17 @@ def _call_claude(client: Anthropic, prompt: str, model_ref: list, max_tokens: in
             logger.info("Model used: %s", model)
             return resp.content[0].text
         except Exception as e:
-            if "not_found_error" in str(e) or "404" in str(e):
-                logger.warning("%s unavailable, trying next...", model)
+            if _is_model_unavailable(e):
+                logger.warning("%s unavailable (%s), trying next...", model, type(e).__name__)
+                last_exc = e
                 continue
             raise
-    raise RuntimeError("No available Claude model found.")
+    raise RuntimeError(f"No available Claude model found. Last error: {last_exc}")
 
 
 def _call_claude_tool(client: Anthropic, prompt: str, tool_schema: dict, model_ref: list, max_tokens: int = 4096) -> dict:
     """Use tool calling to guarantee structured output."""
+    last_exc: Exception | None = None
     for model in MODELS:
         try:
             resp = client.messages.create(
@@ -77,11 +104,12 @@ def _call_claude_tool(client: Anthropic, prompt: str, tool_schema: dict, model_r
                     return dict(block.input)
             raise RuntimeError(f"Claude did not return the expected tool {tool_schema['name']}.")
         except Exception as e:
-            if "not_found_error" in str(e) or "404" in str(e):
-                logger.warning("%s unavailable, trying next...", model)
+            if _is_model_unavailable(e):
+                logger.warning("%s unavailable (%s), trying next...", model, type(e).__name__)
+                last_exc = e
                 continue
             raise
-    raise RuntimeError("No available Claude model found.")
+    raise RuntimeError(f"No available Claude model found. Last error: {last_exc}")
 
 
 def _parse_json(text: str) -> dict:

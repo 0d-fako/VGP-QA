@@ -9,11 +9,11 @@ load_dotenv()
 def get_secret(key: str, default=None):
     """Fetch secret from Streamlit Cloud secrets or local .env / environment."""
     try:
-        if key in st.secrets:          # Streamlit Cloud deployment
+        if key in st.secrets:          
             return st.secrets[key]
     except Exception:
-        pass                           # No secrets.toml on local dev — fall through
-    return os.getenv(key, default)     # Local development via .env
+        pass                           
+    return os.getenv(key, default)     
 
 
 def _build_database_url() -> str | None:
@@ -43,7 +43,10 @@ def _build_database_url() -> str | None:
 
 class Config:
     # Claude API
-    CLAUDE_API_KEY = get_secret("CLAUDE_API_KEY")
+    CLAUDE_API_KEY  = get_secret("CLAUDE_API_KEY")
+
+    # The LLM processor falls back through cheaper models automatically.
+    CLAUDE_MODEL    = get_secret("CLAUDE_MODEL", "claude-haiku-4-5")
 
     # Azure Storage
     AZURE_STORAGE_CONNECTION_STRING = get_secret("AZURE_STORAGE_CONNECTION_STRING")
