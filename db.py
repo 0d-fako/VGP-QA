@@ -17,6 +17,7 @@ All complex objects are stored as JSONB so the schema stays flat and flexible.
 
 import json
 import logging
+from contextlib import contextmanager
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
@@ -182,9 +183,12 @@ CREATE TABLE IF NOT EXISTS qa_runs (
 
 class DatabaseManager:
     """
-    Thin PostgreSQL client using psycopg2.
+    Thin PostgreSQL client using psycopg2 with a connection pool.
     All data is stored as JSONB so no schema migrations are needed for
     model changes — only the Python ser/deser helpers above change.
+
+    Uses ThreadedConnectionPool (minconn=1, maxconn=5) so multiple Streamlit
+    threads share connections without exhausting Postgres max_connections.
     """
 
     def __init__(self):
@@ -194,15 +198,30 @@ class DatabaseManager:
                 "Add it to your .env or Streamlit secrets to enable history persistence."
             )
         import psycopg2
+        import psycopg2.pool
         import psycopg2.extras
         self._psycopg2 = psycopg2
         self._extras = psycopg2.extras
 
-        self._conn_kwargs = {"dsn": config.DATABASE_URL, "connect_timeout": 10}
+        self._pool = psycopg2.pool.ThreadedConnectionPool(
+            minconn=1,
+            maxconn=5,
+            dsn=config.DATABASE_URL,
+            connect_timeout=10,
+        )
         self._ensure_schema()
 
+    @contextmanager
     def _connect(self):
-        return self._psycopg2.connect(**self._conn_kwargs)
+        """Yield a pooled connection; return it on exit."""
+        conn = self._pool.getconn()
+        try:
+            yield conn
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            self._pool.putconn(conn)
 
     def _ensure_schema(self):
         """Create the qa_runs table if it doesn't exist yet."""

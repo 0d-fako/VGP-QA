@@ -171,21 +171,35 @@ def _parse_json(text: str) -> dict:
     raise ValueError(f"No valid JSON object found. Preview: {text[:300]}")
 
 
+_SENSITIVE_KEYS = frozenset({
+    "password", "passwd", "pass", "secret", "token",
+    "api_key", "apikey", "api_secret", "access_token", "refresh_token",
+})
+
+
 def _steps_to_script(steps: List[dict], test_data: dict) -> str:
     """
     Render a list of step dicts as a human-readable pseudo-script.
+    Sensitive test_data values (password, token, etc.) are masked so
+    credentials never appear in the stored display script.
     """
+    # Mask sensitive keys — the real values are only ever used by the executor
+    # at runtime, never written to the display script or the database.
+    safe_data = {
+        k: ("********" if k.lower() in _SENSITIVE_KEYS else v)
+        for k, v in test_data.items()
+    }
     lines = ["# Auto-generated display script (not executed)"]
     for s in steps:
         action = s.get("action", "?")
         selector = s.get("selector", "")
         value = s.get("value", "")
         if action == "goto":
-            url = value.replace("{{url}}", test_data.get("url", "<base_url>"))
+            url = value.replace("{{url}}", safe_data.get("url", "<base_url>"))
             lines.append(f"await page.goto({url!r})")
         elif action == "fill":
             resolved = value
-            for k, v in test_data.items():
+            for k, v in safe_data.items():
                 resolved = resolved.replace(f"{{{{{k}}}}}", str(v))
             lines.append(f"await page.fill({selector!r}, {resolved!r})")
         elif action == "click":

@@ -1,6 +1,7 @@
 import os
 import logging
 import asyncio
+import threading
 import traceback
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
@@ -952,6 +953,13 @@ class PlaywrightExecutor:
             logger.error("Screenshot failed: %s", e)
 
 
+# ── Concurrency guard ────────────────────────────────────────────────────────
+# Hard cap on simultaneous Chromium instances to prevent OOM in production.
+# Tune via MAX_BROWSER_CONCURRENCY env var (default: 3).
+_MAX_BROWSER_CONCURRENCY = int(os.environ.get("MAX_BROWSER_CONCURRENCY", "3"))
+_browser_semaphore = threading.Semaphore(_MAX_BROWSER_CONCURRENCY)
+
+
 # ── Synchronous wrapper ─────────────────────────────────────────────────────
 
 class SyncPlaywrightExecutor:
@@ -961,6 +969,9 @@ class SyncPlaywrightExecutor:
     Each call dispatches the coroutine to a dedicated worker thread that owns
     its own event loop, avoiding conflicts with Streamlit's running event loop
     on Windows and other platforms.
+
+    A module-level Semaphore caps simultaneous browser launches to
+    MAX_BROWSER_CONCURRENCY (default 3) to prevent OOM under concurrent load.
     """
 
     def __init__(self, playwright_config: PlaywrightConfig):
@@ -968,8 +979,9 @@ class SyncPlaywrightExecutor:
 
     def _run(self, coro):
         """Run a coroutine in an isolated thread with its own event loop."""
-        with ThreadPoolExecutor(max_workers=1) as pool:
-            return pool.submit(asyncio.run, coro).result()
+        with _browser_semaphore:
+            with ThreadPoolExecutor(max_workers=1) as pool:
+                return pool.submit(asyncio.run, coro).result()
 
     def execute_test_case(
         self,

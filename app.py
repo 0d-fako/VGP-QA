@@ -28,8 +28,12 @@ st.set_page_config(page_title="QA Test Agent", page_icon="🧪", layout="wide")
 # ── Streamlit Cloud: install Playwright browser binary on first boot ────────
 # Streamlit Cloud only runs requirements.txt — the Dockerfile is ignored.
 # We must download the Chromium binary at runtime exactly once per deployment.
+# Set SKIP_BROWSER_INSTALL=true in Docker/Railway/Render to bypass this step
+# because the binaries are already baked into the image via the Dockerfile.
 @st.cache_resource(show_spinner="Installing browser — first run only, please wait…")
 def _install_playwright_browser():
+    if os.environ.get("SKIP_BROWSER_INSTALL", "").lower() in ("1", "true", "yes"):
+        return 0  # Already installed via Dockerfile — nothing to do.
     result = subprocess.run(
         [sys.executable, "-m", "playwright", "install", "chromium"],
         capture_output=True,
@@ -40,6 +44,34 @@ def _install_playwright_browser():
     return result.returncode
 
 _install_playwright_browser()
+
+
+# ── Startup: clean up orphaned screenshots older than 24 hours ─────────────
+@st.cache_resource(show_spinner=False)
+def _cleanup_orphaned_screenshots():
+    """Delete local screenshot files left behind by crashed/killed executions."""
+    import time
+    screenshots_dir = config.SCREENSHOTS_DIR
+    if not os.path.exists(screenshots_dir):
+        return
+    cutoff = time.time() - 24 * 3600
+    deleted = 0
+    try:
+        for filename in os.listdir(screenshots_dir):
+            filepath = os.path.join(screenshots_dir, filename)
+            if os.path.isfile(filepath) and os.path.getmtime(filepath) < cutoff:
+                try:
+                    os.remove(filepath)
+                    deleted += 1
+                except Exception:
+                    pass
+    except Exception:
+        pass
+    if deleted:
+        import logging as _logging
+        _logging.getLogger(__name__).info("Startup: removed %d orphaned screenshot(s)", deleted)
+
+_cleanup_orphaned_screenshots()
 
 st.markdown("""
 <style>
