@@ -307,7 +307,7 @@ class PlaywrightExecutor:
 
                         # Execute structured steps
                         try:
-                            await self._execute_steps(page, test_case.steps, test_case.test_data)
+                            await self._execute_steps(page, test_case.steps, test_case.test_data, execution)
                             execution.status = "passed"
                             last_error = None
                         except Exception as step_err:
@@ -538,7 +538,7 @@ class PlaywrightExecutor:
                             await self._screenshot(page, execution, "initial")
 
                             try:
-                                await self._execute_steps(page, tc.steps, tc.test_data)
+                                await self._execute_steps(page, tc.steps, tc.test_data, execution)
                                 execution.status = "passed"
                             except Exception as step_err:
                                 execution.status = "failed"
@@ -612,6 +612,7 @@ class PlaywrightExecutor:
         page: Page,
         steps: List[TestStep],
         test_data: Dict[str, Any],
+        execution: "TestExecution | None" = None,   # REQ 5.1: passed in for per-step screenshots
     ) -> None:
         """
         Interpret structured steps against a whitelisted set of Playwright calls.
@@ -628,7 +629,7 @@ class PlaywrightExecutor:
             if creds.get("password"):
                 merged["password"] = creds["password"]
 
-        for step in steps:
+        for step_idx, step in enumerate(steps):
             action = step.action
             if action not in ALLOWED_ACTIONS:
                 raise ValueError(f"Action '{action}' is not in the allowed list.")
@@ -645,13 +646,74 @@ class PlaywrightExecutor:
                 await page.goto(url, timeout=timeout)
 
             elif action == "fill":
-                await page.wait_for_selector(selector, state="visible", timeout=timeout)
-                await page.fill(selector, value)
+                # REQ 7.5: try exact selector first, then broader fallbacks
+                filled = False
+                try:
+                    await page.wait_for_selector(selector, state="visible", timeout=timeout)
+                    await page.fill(selector, value)
+                    filled = True
+                except Exception as fill_err:
+                    if any(k in str(fill_err).lower() for k in ("timeout", "not found", "selector")):
+                        logger.warning(
+                            "fill: primary selector '%s' failed (%s), trying fallbacks…",
+                            selector, str(fill_err)[:80],
+                        )
+                        # Fallback 1: getByPlaceholder (if selector looks like a label)
+                        try:
+                            loc = page.get_by_placeholder(selector.strip("#").strip("[]"), exact=False)
+                            if await loc.count():
+                                await loc.first.fill(value, timeout=timeout)
+                                filled = True
+                                logger.info("fill: succeeded via placeholder fallback for '%s'", selector)
+                        except Exception:
+                            pass
+                        # Fallback 2: getByLabel
+                        if not filled:
+                            try:
+                                loc = page.get_by_label(selector.strip("#").strip("[]"), exact=False)
+                                if await loc.count():
+                                    await loc.first.fill(value, timeout=timeout)
+                                    filled = True
+                                    logger.info("fill: succeeded via label fallback for '%s'", selector)
+                            except Exception:
+                                pass
+                    if not filled:
+                        raise
 
             elif action == "click":
-                await page.wait_for_selector(selector, state="visible", timeout=timeout)
-                # force=True bypasses pointer-event interception (e.g. Tailwind overlay components)
-                await page.click(selector, timeout=timeout, force=step.force)
+                # REQ 7.5: try exact CSS selector, then text-based fallback
+                clicked = False
+                try:
+                    await page.wait_for_selector(selector, state="visible", timeout=timeout)
+                    # force=True bypasses pointer-event interception (e.g. Tailwind overlay components)
+                    await page.click(selector, timeout=timeout, force=step.force)
+                    clicked = True
+                except Exception as click_err:
+                    if any(k in str(click_err).lower() for k in ("timeout", "not found", "selector")):
+                        logger.warning(
+                            "click: primary selector '%s' failed (%s), trying text fallback…",
+                            selector, str(click_err)[:80],
+                        )
+                        # Fallback: try finding by visible text extracted from selector
+                        # e.g. button.submit → look for a button with role + try JS
+                        try:
+                            found = await page.evaluate(
+                                """(sel) => {
+                                    try {
+                                        const el = document.querySelector(sel);
+                                        if (el) { el.click(); return true; }
+                                    } catch(e) {}
+                                    return false;
+                                }""",
+                                selector,
+                            )
+                            if found:
+                                clicked = True
+                                logger.info("click: succeeded via JS querySelector fallback for '%s'", selector)
+                        except Exception:
+                            pass
+                    if not clicked:
+                        raise
 
             elif action == "check":
                 # Dedicated checkbox/radio action.
@@ -886,6 +948,13 @@ class PlaywrightExecutor:
                         )
                     clicked = True
                 logger.info("click_text: clicked element with text '%s'", text)
+
+            # ── REQ 5.1: per-step screenshot ──────────────────────────────
+            if self.config.per_step_screenshots and execution is not None:
+                try:
+                    await self._screenshot(page, execution, f"step_{step_idx + 1:02d}_{action}")
+                except Exception as ss_err:
+                    logger.debug("Per-step screenshot failed (non-fatal): %s", ss_err)
 
     @staticmethod
     def _resolve(template: str, data: Dict[str, Any]) -> str:

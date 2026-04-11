@@ -103,6 +103,7 @@ class PlaywrightConfig:
     max_retries: int = 0            # Phase 1: number of retries on timeout failures (0 = no retry)
     auth_type: str = "form"         # Phase 2: form | cookie | token
     shared_session: bool = False    # Phase 2: share one browser context across the entire test suite
+    per_step_screenshots: bool = False  # REQ 5.1: capture screenshot after every step for deep debugging
 
     def __post_init__(self):
         if self.viewport is None:

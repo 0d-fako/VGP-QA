@@ -412,6 +412,152 @@ class LLMProcessor:
     def rate_limit_exceeded(self) -> bool:
         return self._api_call_count >= config.MAX_API_CALLS_PER_SESSION
 
+    # ── Ambiguity flagging (REQ 1.4) ───────────────────────────────────────
+
+    def flag_ambiguous_requirements(self, requirements: List[Requirement]) -> List[Dict[str, Any]]:
+        """
+        Score each requirement for clarity and testability.
+
+        Returns a list of dicts (one per requirement), each containing:
+            {
+              "requirement_id": str,
+              "clarity_score":  float,   # 0.0 (very ambiguous) – 1.0 (crystal clear)
+              "issues":         [str],   # list of identified ambiguity problems
+              "suggestion":     str,     # one-line clarification suggestion
+            }
+        Only requirements with clarity_score < 0.7 are flagged as ambiguous.
+        """
+        req_text = "\n".join(
+            f"[{r.id}] {r.title}: {r.description}\n"
+            f"  Criteria: {'; '.join(r.acceptance_criteria)}"
+            for r in requirements
+        )
+        prompt = f"""You are a senior QA analyst reviewing requirement clarity.
+
+Analyse each requirement below for ambiguity, vagueness, and testability.
+
+REQUIREMENTS:
+{req_text}
+
+For each requirement, return a JSON object with:
+- "requirement_id": the bracketed ID (e.g. "REQ-001")
+- "clarity_score": float 0.0-1.0 (1.0 = perfectly clear and testable)
+- "issues": list of specific ambiguity problems found (empty list if none)
+- "suggestion": one concrete sentence to make it clearer (empty string if already clear)
+
+Common ambiguity signals to detect:
+  - Vague quantifiers: "fast", "easy", "user-friendly", "appropriate"
+  - Missing actor: who does the action?
+  - Untestable acceptance criteria: "should look good", "works correctly"
+  - Missing boundary conditions: no mention of error cases, limits, or edge conditions
+  - Passive voice hiding the system: "data shall be processed" (by what?)"""
+
+        tool_schema = {
+            "name": "return_ambiguity_scores",
+            "description": "Returns clarity scores for each requirement.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "scores": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "requirement_id": {"type": "string"},
+                                "clarity_score":  {"type": "number"},
+                                "issues":         {"type": "array", "items": {"type": "string"}},
+                                "suggestion":     {"type": "string"},
+                            },
+                            "required": ["requirement_id", "clarity_score", "issues", "suggestion"],
+                        }
+                    }
+                },
+                "required": ["scores"],
+            }
+        }
+        self._track_call("flag_ambiguous_requirements")
+        data = _call_claude_tool(self.client, prompt, tool_schema, self._model, max_tokens=2048)
+        return data.get("scores", [])
+
+    # ── Design asset analysis (REQ 11) ─────────────────────────────────────
+
+    def analyze_design_asset(
+        self,
+        image_data_b64: str,
+        requirements: List[Requirement],
+        media_type: str = "image/png",
+    ) -> Dict[str, Any]:
+        """
+        Use Claude vision to analyse a design/prototype image against requirements.
+
+        Returns:
+            {
+              "ui_elements":      [str],  # key UI elements observed in the design
+              "discrepancies":    [str],  # mismatches between design and requirements
+              "visual_checks":    [str],  # suggested check_text / check_element steps
+              "design_context":   str,    # paragraph summary for injection into test prompt
+            }
+        """
+        req_summary = "\n".join(f"- [{r.id}] {r.title}: {r.description}" for r in requirements)
+        prompt = f"""You are a QA engineer analysing a UI design/prototype.
+
+REQUIREMENTS:
+{req_summary}
+
+Instructions:
+1. List the key UI elements visible in this design (buttons, forms, headings, navigation, etc.)
+2. Identify any discrepancies between what the design shows and what the requirements specify
+3. Suggest specific UI validation steps that should be added to test cases
+   (use Playwright-compatible terms: check_text, check_element, check_attribute)
+4. Write a one-paragraph summary to be injected into the test generation prompt
+
+Return ONLY raw JSON:
+{{
+  "ui_elements":    ["Login form with email and password fields", "Submit button labelled Sign In"],
+  "discrepancies":  ["Design shows 'Sign In' but REQ-002 says 'Login button'"],
+  "visual_checks":  ["check_text: 'Sign In'", "check_element: input[type='email'] visible"],
+  "design_context": "The login page shows..."
+}}"""
+
+        self._track_call("analyze_design_asset")
+        for model in MODELS:
+            try:
+                resp = self.client.messages.create(
+                    model=model,
+                    max_tokens=1024,
+                    messages=[{
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "image",
+                                "source": {
+                                    "type": "base64",
+                                    "media_type": media_type,
+                                    "data": image_data_b64,
+                                },
+                            },
+                            {"type": "text", "text": prompt},
+                        ],
+                    }],
+                )
+                text = resp.content[0].text
+                try:
+                    return _parse_json(text)
+                except Exception:
+                    return {
+                        "ui_elements": [], "discrepancies": [], "visual_checks": [],
+                        "design_context": text[:500],
+                    }
+            except Exception as e:
+                if _is_model_unavailable(e):
+                    logger.warning("Design analysis: model %s unavailable, trying next…", model)
+                    continue
+                logger.error("Design asset analysis error: %s", e)
+                return {"ui_elements": [], "discrepancies": [], "visual_checks": [],
+                        "design_context": f"Vision error: {e}"}
+        return {"ui_elements": [], "discrepancies": [], "visual_checks": [],
+                "design_context": "No vision-capable model available."}
+
     # ── Requirements analysis ──────────────────────────────────────────────
 
     def analyze_requirements(self, document_content: str) -> List[Requirement]:
@@ -488,8 +634,9 @@ Return ONLY a raw JSON object — no markdown, no explanation, no code fences.
         password_selector: str = "#password",
         submit_selector: str = "",
         max_cases: int = 5,
-        dom_snapshot: Optional[Dict] = None,       
-        generate_variations: bool = False,         
+        dom_snapshot: Optional[Dict] = None,
+        generate_variations: bool = False,
+        design_context: Optional[str] = None,      # REQ 11: summary from analyze_design_asset()
     ) -> List[TestCase]:
         requirements = requirements[:max_cases]
         logger.info("Generating %d test cases...", len(requirements))
@@ -514,6 +661,17 @@ Return ONLY a raw JSON object — no markdown, no explanation, no code fences.
 You MUST use the exact selectors from the DOM snapshot above for every element
 that appears there. Using any other selector for those elements is a violation
 and will cause test failures. The snapshot selectors override the defaults below.
+"""
+
+        # Inject design context when available (REQ 11)
+        design_section = ""
+        if design_context and design_context.strip():
+            design_section = f"""
+DESIGN / PROTOTYPE CONTEXT:
+{design_context.strip()}
+
+When generating test cases, include visual validation steps that verify the UI
+matches the design (use check_text and check_element for visible labels/elements).
 """
 
         # Build variations section (Phase 2)
@@ -546,7 +704,7 @@ Example variations:
 
 REQUIREMENTS:
 {req_list}
-{dom_section}
+{dom_section}{design_section}
 SELECTORS (use EXACTLY these for login fields — no others):
 - username field: {username_selector}
 - password field: {password_selector}
