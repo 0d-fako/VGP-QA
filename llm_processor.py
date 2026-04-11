@@ -375,8 +375,9 @@ def _format_dom_snapshot(dom_data: Optional[Dict]) -> str:
         lines.append(f"\nPAGE HEADINGS: {', '.join(headings[:4])}")
 
     lines.append(
-        "\n⚠️  These selectors are from the LIVE application. "
-        "Prefer them over any guessed values."
+        "\n🚫 MANDATORY: You MUST use ONLY the selectors listed above for any element "
+        "that appears in this snapshot. Do NOT invent selectors. Do NOT guess. "
+        "If an element is in the snapshot, its selector is authoritative — use it exactly."
     )
 
     return "\n".join(lines)
@@ -509,9 +510,10 @@ Return ONLY a raw JSON object — no markdown, no explanation, no code fences.
                 dom_section = f"""
 {snapshot_text}
 
-Using the selectors above is STRONGLY PREFERRED over guessing.
-If the DOM snapshot shows a login form, use its exact field selectors
-instead of the defaults listed below.
+⛔ DOM SELECTORS ARE MANDATORY ⛔
+You MUST use the exact selectors from the DOM snapshot above for every element
+that appears there. Using any other selector for those elements is a violation
+and will cause test failures. The snapshot selectors override the defaults below.
 """
 
         # Build variations section (Phase 2)
@@ -631,6 +633,7 @@ POST-LOGIN NAVIGATION TESTS (logout, profile, settings):
                   check_url "/auth"         (or whatever the login page path is)
 {variations_section}
 STRICT RULES — violations silently drop the test case:
+0. If a DOM snapshot was provided above, you MUST use its selectors for those elements
 1. First step MUST be: {{"action": "goto", "value": "{{{{url}}}}"}}
 2. Use {username_selector} for username fills, {password_selector} for password fills
 3. NEVER use data-testid selectors

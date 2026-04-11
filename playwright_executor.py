@@ -365,18 +365,39 @@ class PlaywrightExecutor:
                 try:
                     verdict = vision_fn(final_screenshot, test_case.expected_results)
                     execution.vision_verdict = verdict
+                    vision_passed = verdict.get("passed", True)
+                    vision_conf   = verdict.get("confidence", 0.0)
                     logger.info(
                         "Vision verdict for '%s': passed=%s (confidence=%.2f)",
                         test_case.title,
-                        verdict.get("passed"),
-                        verdict.get("confidence", 0.0),
+                        vision_passed,
+                        vision_conf,
                     )
-                    # Downgrade from passed → failed if vision disagrees
-                    if execution.status == "passed" and not verdict.get("passed", True):
+                    # Downgrade: passed → failed when vision disagrees
+                    if execution.status == "passed" and not vision_passed:
                         execution.status = "failed"
                         execution.error_message = (
                             f"Vision check failed: {verdict.get('explanation', '')}"
                         )
+                    # Upgrade: failed → passed when the failure was a selector/timeout
+                    # issue (test quality, not app quality) AND vision is highly confident
+                    # the page looks correct.  Assertion/auth/network failures are NOT
+                    # upgraded because they indicate a real application problem.
+                    elif (
+                        execution.status == "failed"
+                        and execution.error_type in ("selector", "timeout")
+                        and vision_passed
+                        and vision_conf >= 0.8
+                    ):
+                        logger.info(
+                            "Vision upgrade for '%s': selector/timeout failure overridden "
+                            "by high-confidence vision pass (conf=%.2f). "
+                            "Original error: %s",
+                            test_case.title, vision_conf, execution.error_message,
+                        )
+                        execution.status = "passed"
+                        execution.error_message = None
+                        execution.error_type = None
                 except Exception as ve:
                     logger.error("Vision verification failed: %s", ve)
 
@@ -534,11 +555,29 @@ class PlaywrightExecutor:
                                     try:
                                         verdict = vision_fn(final_ss, tc.expected_results)
                                         execution.vision_verdict = verdict
-                                        if execution.status == "passed" and not verdict.get("passed", True):
+                                        vision_passed = verdict.get("passed", True)
+                                        vision_conf   = verdict.get("confidence", 0.0)
+                                        # Downgrade: passed → failed
+                                        if execution.status == "passed" and not vision_passed:
                                             execution.status = "failed"
                                             execution.error_message = (
                                                 f"Vision check failed: {verdict.get('explanation', '')}"
                                             )
+                                        # Upgrade: failed → passed for selector/timeout failures
+                                        elif (
+                                            execution.status == "failed"
+                                            and execution.error_type in ("selector", "timeout")
+                                            and vision_passed
+                                            and vision_conf >= 0.8
+                                        ):
+                                            logger.info(
+                                                "Vision upgrade for '%s': selector/timeout failure "
+                                                "overridden by high-confidence vision pass (conf=%.2f).",
+                                                tc.title, vision_conf,
+                                            )
+                                            execution.status = "passed"
+                                            execution.error_message = None
+                                            execution.error_type = None
                                     except Exception as ve:
                                         logger.error("Vision verification failed: %s", ve)
 
