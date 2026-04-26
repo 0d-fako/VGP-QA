@@ -61,6 +61,8 @@ def _tc_to_dict(tc: TestCase) -> dict:
         "expected_results": tc.expected_results,
         "playwright_script": tc.playwright_script,
         "variations": tc.variations,
+        "suite": tc.suite,
+        "approved": tc.approved,
         "created_at": tc.created_at.isoformat() if tc.created_at else None,
     }
 
@@ -121,7 +123,7 @@ def _dict_to_tc(d: dict) -> TestCase:
         )
         for s in d.get("steps", [])
     ]
-    return TestCase(
+    tc = TestCase(
         id=d.get("id", ""),
         requirement_id=d.get("requirement_id", ""),
         title=d.get("title", ""),
@@ -130,8 +132,11 @@ def _dict_to_tc(d: dict) -> TestCase:
         expected_results=d.get("expected_results", []),
         playwright_script=d.get("playwright_script", ""),
         variations=d.get("variations", []),
+        suite=d.get("suite"),
+        approved=bool(d.get("approved", False)),
         created_at=datetime.fromisoformat(d["created_at"]) if d.get("created_at") else None,
     )
+    return tc
 
 
 def _dict_to_exec(d: dict) -> TestExecution:
@@ -383,6 +388,125 @@ class DatabaseManager:
         except Exception as e:
             logger.error("DB delete_run failed: %s", e)
             raise
+
+    # ── Analytics ────────────────────────────────────────────────────────────
+
+    def get_analytics(self, limit: int = 30) -> Dict[str, Any]:
+        """
+        Return aggregated analytics data for the dashboard.
+
+        Returns a dict with three keys:
+          trend        — list of {date, pass_rate, total, passed, failed, run_count}
+                         ordered oldest → newest (up to `limit` calendar days)
+          error_types  — {error_type: count} across recent executions (last 30 days)
+          flaky_tests  — list of {tc_id, total, passed, failed, flaky_rate}
+                         for tests that have both passes and failures in recent runs
+        """
+        trend: List[Dict[str, Any]] = []
+        error_types: Dict[str, int] = {}
+        flaky_tests: List[Dict[str, Any]] = []
+
+        try:
+            with self._connect() as conn:
+                with conn.cursor(cursor_factory=self._extras.RealDictCursor) as cur:
+
+                    # ── Per-day aggregates (for trend charts) ────────────────
+                    cur.execute(
+                        """
+                        SELECT
+                            created_at::date                              AS run_date,
+                            COUNT(*)                                      AS run_count,
+                            SUM(jsonb_array_length(executions))           AS total,
+                            SUM((
+                                SELECT COUNT(*)
+                                FROM jsonb_array_elements(executions) e
+                                WHERE e->>'status' = 'passed'
+                            ))                                            AS passed,
+                            SUM((
+                                SELECT COUNT(*)
+                                FROM jsonb_array_elements(executions) e
+                                WHERE e->>'status' IN ('failed','error')
+                            ))                                            AS failed
+                        FROM qa_runs
+                        WHERE created_at > NOW() - INTERVAL '60 days'
+                        GROUP BY created_at::date
+                        ORDER BY run_date ASC
+                        LIMIT %s
+                        """,
+                        (limit,),
+                    )
+                    for row in cur.fetchall():
+                        total = int(row["total"] or 0)
+                        passed = int(row["passed"] or 0)
+                        trend.append({
+                            "date":      str(row["run_date"]),
+                            "run_count": int(row["run_count"] or 0),
+                            "total":     total,
+                            "passed":    passed,
+                            "failed":    int(row["failed"] or 0),
+                            "pass_rate": round(passed / total * 100, 1) if total else 0.0,
+                        })
+
+                    # ── Error-type distribution (last 30 days) ───────────────
+                    cur.execute(
+                        """
+                        SELECT
+                            COALESCE(e->>'error_type', 'unknown') AS error_type,
+                            COUNT(*)                              AS cnt
+                        FROM qa_runs r,
+                             jsonb_array_elements(r.executions) AS e
+                        WHERE e->>'status' != 'passed'
+                          AND e->>'error_type' IS NOT NULL
+                          AND r.created_at > NOW() - INTERVAL '30 days'
+                        GROUP BY e->>'error_type'
+                        ORDER BY cnt DESC
+                        """
+                    )
+                    for row in cur.fetchall():
+                        error_types[row["error_type"]] = int(row["cnt"])
+
+                    # ── Flaky test detection (last 30 days) ──────────────────
+                    cur.execute(
+                        """
+                        WITH recent AS (
+                            SELECT
+                                e->>'test_case_id'   AS tc_id,
+                                e->>'status'         AS status
+                            FROM qa_runs r,
+                                 jsonb_array_elements(r.executions) AS e
+                            WHERE r.created_at > NOW() - INTERVAL '30 days'
+                        )
+                        SELECT
+                            tc_id,
+                            COUNT(*)                                                   AS total,
+                            SUM(CASE WHEN status = 'passed'  THEN 1 ELSE 0 END)       AS passed,
+                            SUM(CASE WHEN status != 'passed' THEN 1 ELSE 0 END)       AS failed
+                        FROM recent
+                        GROUP BY tc_id
+                        HAVING COUNT(*) >= 2
+                           AND SUM(CASE WHEN status = 'passed'  THEN 1 ELSE 0 END) > 0
+                           AND SUM(CASE WHEN status != 'passed' THEN 1 ELSE 0 END) > 0
+                        ORDER BY
+                            (SUM(CASE WHEN status != 'passed' THEN 1 ELSE 0 END)::float / COUNT(*)) DESC
+                        LIMIT 15
+                        """
+                    )
+                    for row in cur.fetchall():
+                        total = int(row["total"])
+                        passed = int(row["passed"])
+                        failed = int(row["failed"])
+                        flaky_tests.append({
+                            "tc_id":      row["tc_id"],
+                            "total":      total,
+                            "passed":     passed,
+                            "failed":     failed,
+                            "flaky_rate": round(failed / total * 100, 1),
+                        })
+
+        except Exception as e:
+            logger.error("DB get_analytics failed: %s", e)
+
+        return {"trend": trend, "error_types": error_types, "flaky_tests": flaky_tests}
 
     @staticmethod
     def is_configured() -> bool:

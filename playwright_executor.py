@@ -29,6 +29,14 @@ ALLOWED_ACTIONS = {
     "check_element", # Assert element state: visible | hidden | enabled | disabled | checked | unchecked
     "check_attribute", # Assert element attribute: "attr=expected_value"
     "check_count",   # Assert count of matching elements equals expected integer
+    # ── Modern web: modal / iframe / shadow DOM / uploads / DnD ─────────
+    "dismiss_modal", # Close a modal/dialog overlay (Escape + common close-button patterns)
+    "iframe_switch", # Switch execution context into an iframe (value: URL fragment, name, index, or CSS sel)
+    "iframe_exit",   # Return to the main page context after iframe_switch
+    "wait_for_stable", # Wait for selector to be visible AND stop moving (layout stabilised)
+    "select_custom", # Handle non-native custom dropdowns: click trigger, then select option by text
+    "upload_file",   # Set file-input value — selector: input[type=file], value: absolute/relative file path
+    "drag_drop",     # Drag selector element onto target element (target CSS selector in value)
 }
 
 
@@ -58,6 +66,85 @@ def _categorize_error(err: Exception) -> str:
     if any(k in err_str.lower() for k in ("selector", "element", "locator", "not found", "no element")):
         return "selector"
     return "unknown"
+
+
+async def _resolve_frame(page: Page, frame_ref: str):
+    """
+    Resolve an iframe by URL fragment, name, integer index, or CSS selector.
+    Returns the matching Frame or raises ValueError.
+    """
+    frames = page.frames
+    if frame_ref.isdigit():
+        idx = int(frame_ref)
+        if idx < len(frames):
+            return frames[idx]
+        raise ValueError(f"iframe_switch: frame index {idx} out of range (have {len(frames)})")
+    for frame in frames:
+        if frame_ref in frame.url or frame.name == frame_ref:
+            return frame
+    # Last resort: locate the <iframe> element by CSS selector and get its content frame
+    try:
+        el = await page.wait_for_selector(frame_ref, state="attached", timeout=5000)
+        content = await el.content_frame()
+        if content:
+            return content
+    except Exception:
+        pass
+    raise ValueError(f"iframe_switch: could not resolve frame '{frame_ref}'")
+
+
+async def _dismiss_modal(page: Page, selector: Optional[str], timeout: int) -> None:
+    """
+    Try to close a modal/dialog overlay.
+    Order: explicit selector → Escape key → common close-button patterns.
+    """
+    if selector:
+        try:
+            await page.click(selector, timeout=min(timeout, 5000))
+            await page.wait_for_timeout(200)
+            return
+        except Exception:
+            pass
+
+    await page.keyboard.press("Escape")
+    await page.wait_for_timeout(300)
+
+    close_patterns = [
+        '[aria-label="Close"]', '[aria-label="close"]', '[aria-label="Dismiss"]',
+        'button:has-text("×")', 'button:has-text("✕")', 'button:has-text("Close")',
+        '.modal-close', '.close-button', '.btn-close',
+        '[data-dismiss="modal"]', '[data-testid="modal-close"]', '[data-testid="close-button"]',
+        'dialog [type="button"]',
+    ]
+    for pattern in close_patterns:
+        try:
+            loc = page.locator(pattern).first
+            if await loc.is_visible():
+                await loc.click(timeout=2000)
+                await page.wait_for_timeout(200)
+                return
+        except Exception:
+            continue
+
+
+def _shadow_locator(ctx, selector: str):
+    """
+    Resolve a selector that may target elements inside a Shadow DOM.
+
+    Supported formats:
+      • 'shadow:host-sel>>>inner-sel'  — explicit shadow-pierce syntax
+      • Any selector with '>>'         — passed through; Playwright's CSS engine
+                                         pierces shadow roots natively with >>
+
+    All other selectors are passed through unchanged.
+    """
+    if selector.startswith("shadow:"):
+        inner = selector[7:]
+        if ">>>" in inner:
+            host_sel, _, inner_sel = inner.partition(">>>")
+            return ctx.locator(host_sel.strip()).locator(inner_sel.strip())
+        return ctx.locator(inner)
+    return ctx.locator(selector)
 
 
 def get_metrics(executions: List[TestExecution]) -> dict:
@@ -629,6 +716,11 @@ class PlaywrightExecutor:
             if creds.get("password"):
                 merged["password"] = creds["password"]
 
+        # ctx tracks the current execution context: main Page or a Frame inside an iframe.
+        # iframe_switch sets it; iframe_exit resets it back to page.
+        # Navigation actions (goto, wait_for_load_state) always use the main page.
+        ctx = page  # type: ignore[assignment]  # Page | Frame share the locator API
+
         for step_idx, step in enumerate(steps):
             action = step.action
             if action not in ALLOWED_ACTIONS:
@@ -639,7 +731,14 @@ class PlaywrightExecutor:
             value = self._resolve(raw_value, merged)
             timeout = step.timeout or self.config.timeout
 
-            logger.debug("Step: %s | selector=%s | value=%s", action, selector, value)
+            # Per-step frame override: if step.frame is set, temporarily resolve
+            # that frame for this single step without altering the persistent ctx.
+            if step.frame and action not in ("iframe_switch", "iframe_exit"):
+                step_ctx = await _resolve_frame(page, step.frame)
+            else:
+                step_ctx = ctx
+
+            logger.debug("Step: %s | selector=%s | value=%s | frame=%s", action, selector, value, step.frame)
 
             if action == "goto":
                 url = value if value else merged["url"]
@@ -649,8 +748,8 @@ class PlaywrightExecutor:
                 # REQ 7.5: try exact selector first, then broader fallbacks
                 filled = False
                 try:
-                    await page.wait_for_selector(selector, state="visible", timeout=timeout)
-                    await page.fill(selector, value)
+                    await step_ctx.wait_for_selector(selector, state="visible", timeout=timeout)
+                    await step_ctx.fill(selector, value)
                     filled = True
                 except Exception as fill_err:
                     if any(k in str(fill_err).lower() for k in ("timeout", "not found", "selector")):
@@ -660,7 +759,7 @@ class PlaywrightExecutor:
                         )
                         # Fallback 1: getByPlaceholder (if selector looks like a label)
                         try:
-                            loc = page.get_by_placeholder(selector.strip("#").strip("[]"), exact=False)
+                            loc = step_ctx.get_by_placeholder(selector.strip("#").strip("[]"), exact=False)
                             if await loc.count():
                                 await loc.first.fill(value, timeout=timeout)
                                 filled = True
@@ -670,7 +769,7 @@ class PlaywrightExecutor:
                         # Fallback 2: getByLabel
                         if not filled:
                             try:
-                                loc = page.get_by_label(selector.strip("#").strip("[]"), exact=False)
+                                loc = step_ctx.get_by_label(selector.strip("#").strip("[]"), exact=False)
                                 if await loc.count():
                                     await loc.first.fill(value, timeout=timeout)
                                     filled = True
@@ -684,9 +783,9 @@ class PlaywrightExecutor:
                 # REQ 7.5: try exact CSS selector, then text-based fallback
                 clicked = False
                 try:
-                    await page.wait_for_selector(selector, state="visible", timeout=timeout)
+                    await step_ctx.wait_for_selector(selector, state="visible", timeout=timeout)
                     # force=True bypasses pointer-event interception (e.g. Tailwind overlay components)
-                    await page.click(selector, timeout=timeout, force=step.force)
+                    await step_ctx.click(selector, timeout=timeout, force=step.force)
                     clicked = True
                 except Exception as click_err:
                     if any(k in str(click_err).lower() for k in ("timeout", "not found", "selector")):
@@ -694,10 +793,8 @@ class PlaywrightExecutor:
                             "click: primary selector '%s' failed (%s), trying text fallback…",
                             selector, str(click_err)[:80],
                         )
-                        # Fallback: try finding by visible text extracted from selector
-                        # e.g. button.submit → look for a button with role + try JS
                         try:
-                            found = await page.evaluate(
+                            found = await step_ctx.evaluate(
                                 """(sel) => {
                                     try {
                                         const el = document.querySelector(sel);
@@ -717,12 +814,9 @@ class PlaywrightExecutor:
 
             elif action == "check":
                 # Dedicated checkbox/radio action.
-                # Uses step.force=True to bypass Tailwind/custom overlay interception.
-                # If page.check() still fails (e.g. aria-hidden overlay), falls back to
-                # a direct JavaScript click on the underlying input element.
-                await page.wait_for_selector(selector, timeout=timeout)
+                await step_ctx.wait_for_selector(selector, timeout=timeout)
                 try:
-                    await page.check(selector, timeout=timeout, force=step.force)
+                    await step_ctx.check(selector, timeout=timeout, force=step.force)
                 except Exception as check_err:
                     intercept_keywords = ("intercepts pointer events", "timeout", "TimeoutError")
                     if any(kw.lower() in str(check_err).lower() for kw in intercept_keywords):
@@ -730,17 +824,16 @@ class PlaywrightExecutor:
                             "page.check() failed (%s: %s) — falling back to JS .click()",
                             type(check_err).__name__, str(check_err)[:80],
                         )
-                        # Direct JS click on the checkbox element, bypassing all overlays
-                        await page.locator(selector).evaluate("el => el.click()")
+                        await step_ctx.locator(selector).evaluate("el => el.click()")
                     else:
                         raise
 
             elif action == "press":
                 key = value if value else "Enter"
-                await page.press(selector, key)
+                await step_ctx.press(selector, key)
 
             elif action == "wait_for_selector":
-                await page.wait_for_selector(selector, timeout=timeout)
+                await step_ctx.wait_for_selector(selector, timeout=timeout)
 
             elif action == "wait_for_load_state":
                 state = value if value in {"load", "domcontentloaded", "networkidle"} else "networkidle"
@@ -786,19 +879,15 @@ class PlaywrightExecutor:
             # ── Phase 3 assertions ────────────────────────────────────────
 
             elif action == "check_text":
-                # value: text to find in the page or element.
-                # Prefix with "!" to assert the text is NOT present.
-                # selector is optional (defaults to "body").
-                raw = raw_value  # use raw_value before _resolve so "!" is preserved
+                raw = raw_value
                 negate = raw.startswith("!")
                 search_raw = raw[1:] if negate else raw
                 search_text = self._resolve(search_raw, merged)
                 target_sel = selector or "body"
                 try:
-                    content = await page.locator(target_sel).text_content(timeout=timeout) or ""
+                    content = await step_ctx.locator(target_sel).text_content(timeout=timeout) or ""
                 except Exception:
-                    # Fallback to full page HTML text if the locator fails
-                    content = await page.inner_text("body") if target_sel == "body" else ""
+                    content = await step_ctx.inner_text("body") if target_sel == "body" else ""
                 found = search_text.lower() in content.lower()
                 if negate:
                     if found:
@@ -816,9 +905,8 @@ class PlaywrightExecutor:
                     logger.info("check_text passed: '%s' found in '%s'", search_text, target_sel)
 
             elif action == "check_element":
-                # value: "visible" | "hidden" | "enabled" | "disabled" | "checked" | "unchecked"
                 state = value.strip().lower() if value else "visible"
-                loc = page.locator(selector)
+                loc = step_ctx.locator(selector)
                 if state == "visible":
                     if not await loc.is_visible():
                         raise AssertionError(f"check_element failed: '{selector}' is not visible")
@@ -854,7 +942,7 @@ class PlaywrightExecutor:
                 attr_name, _, expected_attr = value.partition("=")
                 attr_name = attr_name.strip()
                 expected_attr = self._resolve(expected_attr.strip(), merged)
-                actual_attr = await page.get_attribute(selector, attr_name, timeout=timeout)
+                actual_attr = await step_ctx.get_attribute(selector, attr_name, timeout=timeout)
                 if actual_attr is None:
                     raise AssertionError(
                         f"check_attribute failed: '{selector}' has no attribute '{attr_name}'"
@@ -872,7 +960,7 @@ class PlaywrightExecutor:
                     expected_count = int(value)
                 except (ValueError, TypeError):
                     raise ValueError(f"check_count: value must be an integer, got '{value}'")
-                actual_count = await page.locator(selector).count()
+                actual_count = await step_ctx.locator(selector).count()
                 if actual_count != expected_count:
                     raise AssertionError(
                         f"check_count failed: '{selector}' found {actual_count} elements, "
@@ -881,56 +969,48 @@ class PlaywrightExecutor:
                 logger.info("check_count passed: '%s' has %d element(s)", selector, expected_count)
 
             elif action == "scroll_to":
-                # Scroll the matched element into view — needed for lazy-loaded content.
-                await page.locator(selector).scroll_into_view_if_needed(timeout=timeout)
+                await _shadow_locator(step_ctx, selector).scroll_into_view_if_needed(timeout=timeout)
                 logger.info("scroll_to: '%s' scrolled into viewport", selector)
 
             elif action == "hover":
-                # Move the mouse over an element to reveal dropdowns, tooltips, etc.
-                await page.wait_for_selector(selector, state="visible", timeout=timeout)
-                await page.hover(selector, timeout=timeout)
+                await step_ctx.wait_for_selector(selector, state="visible", timeout=timeout)
+                await step_ctx.hover(selector, timeout=timeout)
                 logger.info("hover: over '%s'", selector)
 
             elif action == "select":
-                # Choose an option in a <select> element by value attribute or label text.
-                await page.wait_for_selector(selector, state="visible", timeout=timeout)
+                await step_ctx.wait_for_selector(selector, state="visible", timeout=timeout)
                 try:
-                    await page.select_option(selector, value=value, timeout=timeout)
+                    await step_ctx.select_option(selector, value=value, timeout=timeout)
                 except Exception:
-                    # Fallback: try matching by visible label text
-                    await page.select_option(selector, label=value, timeout=timeout)
+                    await step_ctx.select_option(selector, label=value, timeout=timeout)
                 logger.info("select: '%s' → option '%s'", selector, value)
 
             elif action == "click_text":
-                # Click a button or link by its visible text content.
-                # This is the RECOMMENDED way to click logout, nav, and action buttons
-                # when you know the label but not the CSS selector.
-                # Tries: button role → link role → generic text → JS fallback.
                 text = value or ""
                 clicked = False
                 # 1. Try role=button with matching name
-                btn_loc = page.get_by_role("button", name=text, exact=False)
+                btn_loc = step_ctx.get_by_role("button", name=text, exact=False)
                 if await btn_loc.count():
                     await btn_loc.first.wait_for(state="visible", timeout=timeout)
                     await btn_loc.first.click(timeout=timeout)
                     clicked = True
                 # 2. Try role=link with matching name
                 if not clicked:
-                    link_loc = page.get_by_role("link", name=text, exact=False)
+                    link_loc = step_ctx.get_by_role("link", name=text, exact=False)
                     if await link_loc.count():
                         await link_loc.first.wait_for(state="visible", timeout=timeout)
                         await link_loc.first.click(timeout=timeout)
                         clicked = True
                 # 3. Try any element that contains the text
                 if not clicked:
-                    text_loc = page.get_by_text(text, exact=False)
+                    text_loc = step_ctx.get_by_text(text, exact=False)
                     if await text_loc.count():
                         await text_loc.first.wait_for(state="visible", timeout=timeout)
                         await text_loc.first.click(timeout=timeout)
                         clicked = True
                 # 4. JS fallback — searches all interactive elements for matching text
                 if not clicked:
-                    found = await page.evaluate(
+                    found = await step_ctx.evaluate(
                         """(text) => {
                             const tags = ['button', 'a', '[role="button"]', '[role="link"]'];
                             const els = [...document.querySelectorAll(tags.join(','))];
@@ -948,6 +1028,104 @@ class PlaywrightExecutor:
                         )
                     clicked = True
                 logger.info("click_text: clicked element with text '%s'", text)
+
+            # ── Modal detection & dismiss ──────────────────────────────────
+
+            elif action == "dismiss_modal":
+                await _dismiss_modal(page, selector, timeout)
+                logger.info("dismiss_modal: modal dismissed (selector=%s)", selector)
+
+            # ── iFrame context switch ──────────────────────────────────────
+
+            elif action == "iframe_switch":
+                # value or selector identifies the frame (URL fragment / name / index / CSS)
+                frame_ref = value or selector or ""
+                ctx = await _resolve_frame(page, frame_ref)
+                logger.info("iframe_switch: switched to frame '%s'", frame_ref)
+
+            elif action == "iframe_exit":
+                ctx = page
+                logger.info("iframe_exit: returned to main page context")
+
+            # ── Shadow DOM & dynamic loading ───────────────────────────────
+
+            elif action == "wait_for_stable":
+                # Wait until the element is visible and its bounding rect stops changing.
+                await page.wait_for_selector(selector, state="visible", timeout=timeout)
+                await page.evaluate(
+                    """(sel) => new Promise(resolve => {
+                        const el = document.querySelector(sel);
+                        if (!el) { resolve(); return; }
+                        let last = JSON.stringify(el.getBoundingClientRect());
+                        let streak = 0;
+                        const t = setInterval(() => {
+                            const cur = JSON.stringify(el.getBoundingClientRect());
+                            streak = cur === last ? streak + 1 : 0;
+                            last = cur;
+                            if (streak >= 4) { clearInterval(t); resolve(); }
+                        }, 80);
+                        setTimeout(() => { clearInterval(t); resolve(); }, Math.min(3000, %d));
+                    })""" % min(timeout, 5000),
+                    selector,
+                )
+                logger.info("wait_for_stable: '%s' layout stabilised", selector)
+
+            # ── Custom dropdown (non-native) ───────────────────────────────
+
+            elif action == "select_custom":
+                # selector = dropdown trigger; value = option text to select
+                target = _shadow_locator(ctx, selector) if selector else None
+                if target is None:
+                    raise ValueError("select_custom: selector is required")
+                await target.wait_for(state="visible", timeout=timeout)
+                await target.click(timeout=timeout)
+                await page.wait_for_timeout(350)  # let the dropdown animate open
+
+                # Try ARIA option role first, then common list-item patterns
+                opt_found = False
+                for opt_loc in [
+                    page.get_by_role("option", name=value, exact=False),
+                    page.locator(f'[role="listbox"] [role="option"]:has-text("{value}")'),
+                    page.locator(f'[role="menu"] [role="menuitem"]:has-text("{value}")'),
+                    page.locator(f'ul li:has-text("{value}")'),
+                    page.get_by_text(value, exact=False),
+                ]:
+                    try:
+                        if await opt_loc.count():
+                            visible = opt_loc.first
+                            if await visible.is_visible():
+                                await visible.click(timeout=timeout)
+                                opt_found = True
+                                break
+                    except Exception:
+                        continue
+                if not opt_found:
+                    raise AssertionError(
+                        f"select_custom: option '{value}' not found in dropdown triggered by '{selector}'"
+                    )
+                logger.info("select_custom: '%s' → '%s'", selector, value)
+
+            # ── File upload ────────────────────────────────────────────────
+
+            elif action == "upload_file":
+                # selector = file input element; value = path(s) to upload
+                # Multiple files: separate paths with '|' in value
+                paths = [p.strip() for p in value.split("|")] if "|" in value else value
+                await page.set_input_files(selector, paths, timeout=timeout)
+                logger.info("upload_file: '%s' ← %s", selector, paths)
+
+            # ── Drag and drop ──────────────────────────────────────────────
+
+            elif action == "drag_drop":
+                # selector = source element; value = target element selector
+                if not value:
+                    raise ValueError("drag_drop: value must contain the target element selector")
+                await page.drag_and_drop(selector, value, timeout=timeout)
+                logger.info("drag_drop: '%s' → '%s'", selector, value)
+
+            # ── Per-step frame override: if step.frame is set, use it just for this step ──
+            # (This runs BEFORE the screenshot block but AFTER all action dispatches above,
+            #  because iframe_switch / iframe_exit already handled their own ctx updates.)
 
             # ── REQ 5.1: per-step screenshot ──────────────────────────────
             if self.config.per_step_screenshots and execution is not None:

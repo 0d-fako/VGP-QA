@@ -7,11 +7,14 @@ import uuid
 @dataclass
 class TestStep:
     """A single whitelisted Playwright action step."""
-    action: str              # goto | fill | click | check | press | wait_for_selector | wait_for_load_state | wait_for_timeout | check_url
-    selector: Optional[str] = None  # CSS selector (for fill, click, check, press, wait_for_selector)
-    value: Optional[str] = None     # URL/text/key/state/ms — supports {{url}}, {{username}}, {{password}}
+    action: str              # goto | fill | click | check | press | wait_for_selector | wait_for_load_state |
+                             # wait_for_timeout | check_url | dismiss_modal | iframe_switch | iframe_exit |
+                             # wait_for_stable | select_custom | upload_file | drag_drop
+    selector: Optional[str] = None  # CSS selector; prefix with 'shadow:host>>>inner' for shadow DOM
+    value: Optional[str] = None     # URL/text/key/state/ms/file-path — supports {{url}}, {{username}}, {{password}}
     timeout: Optional[int] = None   # Override default timeout (ms)
     force: bool = False      # click only: bypass pointer-event interception (e.g. Tailwind overlay checkboxes)
+    frame: Optional[str] = None     # iframe_switch / per-step frame: URL fragment, name, index, or CSS selector
 
 
 @dataclass
@@ -42,6 +45,8 @@ class TestCase:
     expected_results: List[str]
     playwright_script: str = ""     # Human-readable display only — never executed
     variations: List[Dict[str, Any]] = field(default_factory=list)  # Phase 2: parameterization
+    suite: Optional[str] = None     # Suite/folder grouping label
+    approved: bool = False          # Approval gate: must be True before execution
     created_at: datetime = None
 
     def __post_init__(self):
