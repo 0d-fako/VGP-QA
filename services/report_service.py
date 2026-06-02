@@ -3,7 +3,7 @@ from typing import List, Optional
 
 import pandas as pd
 
-from llm_processor import generate_csv_report, generate_junit_xml
+from services.llm_processor import generate_csv_report, generate_junit_xml
 from models import TestCase, TestExecution, TestReport
 
 

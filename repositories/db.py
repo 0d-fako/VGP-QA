@@ -21,7 +21,7 @@ from contextlib import contextmanager
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
-from config import config
+from core.config import config
 from models import (
     Requirement, TestCase, TestExecution, TestReport, TestStep
 )

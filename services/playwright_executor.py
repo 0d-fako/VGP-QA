@@ -9,7 +9,7 @@ from typing import List, Dict, Any, Optional, Callable
 
 from playwright.async_api import async_playwright, Page, Browser, BrowserContext
 
-from config import config
+from core.config import config
 from models import TestCase, TestStep, TestExecution, PlaywrightConfig
 
 logger = logging.getLogger(__name__)

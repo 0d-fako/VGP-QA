@@ -2,7 +2,7 @@ from datetime import datetime
 from typing import Generator, List, Optional, Tuple
 
 from models import PlaywrightConfig, TestCase, TestExecution
-from playwright_executor import SyncPlaywrightExecutor
+from services.playwright_executor import SyncPlaywrightExecutor
 
 
 class ExecutionController:

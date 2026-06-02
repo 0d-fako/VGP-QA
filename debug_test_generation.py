@@ -6,7 +6,7 @@ import sys
 from dotenv import load_dotenv
 load_dotenv()
 
-from llm_processor import LLMProcessor
+from services.llm_processor import LLMProcessor
 from models import PlaywrightConfig
 
 def debug_test_generation():

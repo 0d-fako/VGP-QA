@@ -14,22 +14,22 @@ from datetime import datetime
 import pandas as pd
 import streamlit as st
 
-from config import config, configure_logging
+from core.config import config, configure_logging
 from models import PlaywrightConfig, TestCase as _TC, TestStep as _TS
-from playwright_executor import get_metrics, inspect_dom
-from azure_storage import AzureStorageManager, LocalStorageManager
-from db import DatabaseManager
-from llm_processor import LLMProcessor
+from services.playwright_executor import get_metrics, inspect_dom
+from repositories.azure_storage import AzureStorageManager, LocalStorageManager
+from repositories.db import DatabaseManager
+from services.llm_processor import LLMProcessor
 
-from session_state import init as _init_state, state
-from workflow_service import WorkflowService
-from execution_controller import ExecutionController
-from report_service import ReportService
+from core.session_state import init as _init_state, state
+from services.workflow_service import WorkflowService
+from controllers.execution_controller import ExecutionController
+from services.report_service import ReportService
 
 # Configure logging once at startup
 configure_logging()
 
-st.set_page_config(page_title="QA Test Agent", page_icon="🧪", layout="wide")
+st.set_page_config(page_title="Quiv Agent", page_icon=":material/science:", layout="wide")
 
 
 # ── Streamlit Cloud: install Playwright browser binary on first boot ────────
@@ -43,7 +43,7 @@ def _install_playwright_browser():
         text=True,
     )
     if result.returncode != 0:
-        st.warning(f"⚠️ Browser install issue: {result.stderr[:300]}")
+        st.warning(f"Browser install issue: {result.stderr[:300]}", icon=":material/warning:")
     return result.returncode
 
 _install_playwright_browser()
@@ -77,18 +77,381 @@ _cleanup_orphaned_screenshots()
 
 st.markdown("""
 <style>
-.stButton>button { width: 100%; }
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@20..48,400,0,0&display=swap');
+
+:root {
+    --color-fg:      #000000;
+    --color-bg:      #FFFFFF;
+    --color-surface: #F5F5F4;
+    --color-border:  #E8E8E4;
+    --color-muted:   #6B7280;
+    --color-ink:     #1A1A1A;
+    --color-blue:    #3B82F6;
+    --color-orange:  #F97316;
+    --radius-sm:  4px;
+    --radius-md:  8px;
+    --radius-lg:  12px;
+    --radius-xl:  16px;
+    --radius-full: 9999px;
+    --font-body: 'Inter', system-ui, sans-serif;
+    --font-mono: 'JetBrains Mono', monospace;
+    --dur-fast: 100ms;
+    --dur-base: 150ms;
+    --ease: ease-out;
+}
+
+/* Global font */
+html, body, [class*="css"], .stApp {
+    font-family: var(--font-body) !important;
+    color: var(--color-ink) !important;
+    background-color: var(--color-bg) !important;
+}
+
+/* ── Layout ───────────────────────────────────────────── */
+.main .block-container {
+    padding-top: 2.5rem !important;
+    padding-bottom: 3rem !important;
+    max-width: 1200px !important;
+}
+
+/* ── Sidebar ──────────────────────────────────────────── */
+[data-testid="stSidebar"] {
+    background-color: var(--color-surface) !important;
+    border-right: 0.5px solid var(--color-border) !important;
+}
+[data-testid="stSidebar"] * {
+    font-family: var(--font-body) !important;
+}
+
+/* ── Typography ───────────────────────────────────────── */
+h1, .stApp h1 {
+    font-size: 36px !important;
+    font-weight: 700 !important;
+    letter-spacing: -0.02em !important;
+    line-height: 1.15 !important;
+    color: var(--color-fg) !important;
+}
+h2, .stApp h2 {
+    font-size: 26px !important;
+    font-weight: 600 !important;
+    letter-spacing: -0.02em !important;
+    color: var(--color-fg) !important;
+}
+h3, .stApp h3 {
+    font-size: 20px !important;
+    font-weight: 600 !important;
+    letter-spacing: -0.01em !important;
+    color: var(--color-fg) !important;
+}
+p, li, .stMarkdown p {
+    font-size: 15px !important;
+    color: var(--color-ink) !important;
+    line-height: 1.6 !important;
+}
+[data-testid="stCaptionContainer"], .stCaptionContainer {
+    font-size: 12px !important;
+    color: var(--color-muted) !important;
+}
+
+/* ── Buttons — Primary ────────────────────────────────── */
+.stButton > button[kind="primary"],
+.stFormSubmitButton > button {
+    background-color: var(--color-fg) !important;
+    color: #FFFFFF !important;
+    border: none !important;
+    border-radius: var(--radius-md) !important;
+    font-size: 13px !important;
+    font-weight: 500 !important;
+    padding: 8px 16px !important;
+    font-family: var(--font-body) !important;
+    transition: background-color var(--dur-base) var(--ease),
+                transform var(--dur-fast) var(--ease) !important;
+    box-shadow: none !important;
+}
+.stButton > button[kind="primary"]:hover,
+.stFormSubmitButton > button:hover {
+    background-color: var(--color-ink) !important;
+    transform: translateY(-2px) !important;
+    color: #FFFFFF !important;
+}
+.stButton > button[kind="primary"]:active {
+    transform: scale(0.98) !important;
+}
+/* Force label + icon to inherit the button colour (overrides global p{}) */
+.stButton > button[kind="primary"] *,
+.stFormSubmitButton > button * {
+    color: #FFFFFF !important;
+}
+
+/* ── Buttons — Secondary ──────────────────────────────── */
+.stButton > button:not([kind="primary"]),
+.stDownloadButton > button {
+    background-color: transparent !important;
+    color: var(--color-fg) !important;
+    border: 0.5px solid var(--color-border) !important;
+    border-radius: var(--radius-md) !important;
+    font-size: 13px !important;
+    font-weight: 500 !important;
+    padding: 8px 16px !important;
+    font-family: var(--font-body) !important;
+    transition: background-color var(--dur-base) var(--ease),
+                border-color var(--dur-base) var(--ease),
+                transform var(--dur-fast) var(--ease) !important;
+    box-shadow: none !important;
+}
+.stButton > button:not([kind="primary"]):hover,
+.stDownloadButton > button:hover {
+    background-color: var(--color-surface) !important;
+    border-color: #C4C4C0 !important;
+    transform: translateY(-2px) !important;
+}
+.stButton > button:not([kind="primary"]):active {
+    transform: scale(0.98) !important;
+}
+/* Force label + icon to inherit the button colour (overrides global p{}) */
+.stButton > button:not([kind="primary"]) *,
+.stDownloadButton > button * {
+    color: var(--color-fg) !important;
+}
+/* full-width override */
+.stButton > button { width: 100%; }
+
+/* ── Material Symbols icon helper (for raw-HTML contexts) ─ */
+.msi {
+    font-family: 'Material Symbols Outlined' !important;
+    font-weight: normal;
+    font-style: normal;
+    line-height: 1;
+    display: inline-flex;
+    vertical-align: middle;
+    font-size: 18px;
+    -webkit-font-smoothing: antialiased;
+    font-variation-settings: 'FILL' 0, 'wght' 400, 'GRAD' 0, 'opsz' 20;
+    position: relative;
+    top: -1px;
+}
+
+/* ── Inputs ───────────────────────────────────────────── */
+.stTextInput > div > div > input,
+.stTextArea > div > div > textarea,
+.stNumberInput > div > div > input {
+    border: 0.5px solid var(--color-border) !important;
+    border-radius: var(--radius-md) !important;
+    background-color: var(--color-bg) !important;
+    font-size: 13px !important;
+    font-family: var(--font-body) !important;
+    color: var(--color-ink) !important;
+    height: 40px !important;
+    padding: 8px 12px !important;
+    transition: border-color var(--dur-base) var(--ease) !important;
+    box-shadow: none !important;
+}
+.stTextArea > div > div > textarea { height: auto !important; }
+.stTextInput > div > div > input:focus,
+.stTextArea > div > div > textarea:focus,
+.stNumberInput > div > div > input:focus {
+    border-color: var(--color-fg) !important;
+    box-shadow: 0 0 0 2px rgba(0,0,0,0.08) !important;
+    outline: none !important;
+}
+
+/* ── Selectbox ────────────────────────────────────────── */
+.stSelectbox > div > div,
+.stMultiSelect > div > div {
+    border: 0.5px solid var(--color-border) !important;
+    border-radius: var(--radius-md) !important;
+    background-color: var(--color-bg) !important;
+    font-size: 13px !important;
+    font-family: var(--font-body) !important;
+    min-height: 40px !important;
+}
+
+/* ── Expanders ────────────────────────────────────────── */
+.stExpander {
+    border: 0.5px solid var(--color-border) !important;
+    border-radius: var(--radius-lg) !important;
+    background-color: var(--color-bg) !important;
+    overflow: hidden !important;
+    margin-bottom: 8px !important;
+    box-shadow: none !important;
+}
+.stExpander > details > summary {
+    font-size: 14px !important;
+    font-weight: 500 !important;
+    color: var(--color-ink) !important;
+    padding: 12px 16px !important;
+    background-color: var(--color-bg) !important;
+}
+.stExpander > details > summary:hover {
+    background-color: var(--color-surface) !important;
+}
+
+/* ── Containers with border ───────────────────────────── */
+[data-testid="stVerticalBlockBorderWrapper"] {
+    border: 0.5px solid var(--color-border) !important;
+    border-radius: var(--radius-lg) !important;
+    padding: 20px 24px !important;
+    background-color: var(--color-bg) !important;
+    box-shadow: none !important;
+}
+
+/* ── Metrics ──────────────────────────────────────────── */
+[data-testid="stMetric"] {
+    background-color: var(--color-surface) !important;
+    border: 0.5px solid var(--color-border) !important;
+    border-radius: var(--radius-lg) !important;
+    padding: 16px 20px !important;
+}
+[data-testid="stMetricLabel"] > div {
+    font-size: 11px !important;
+    font-weight: 500 !important;
+    text-transform: uppercase !important;
+    letter-spacing: 0.06em !important;
+    color: var(--color-muted) !important;
+}
+[data-testid="stMetricValue"] > div {
+    font-size: 30px !important;
+    font-weight: 700 !important;
+    letter-spacing: -0.02em !important;
+    color: var(--color-fg) !important;
+    line-height: 1.15 !important;
+}
+
+/* ── Tabs ─────────────────────────────────────────────── */
+.stTabs [data-baseweb="tab-list"] {
+    background-color: transparent !important;
+    border-bottom: 0.5px solid var(--color-border) !important;
+    gap: 4px !important;
+}
+.stTabs [data-baseweb="tab"] {
+    background-color: transparent !important;
+    color: var(--color-muted) !important;
+    font-size: 13px !important;
+    font-weight: 500 !important;
+    padding: 8px 14px !important;
+    border-radius: 0 !important;
+    border-bottom: 2px solid transparent !important;
+    transition: color var(--dur-base) var(--ease) !important;
+}
+.stTabs [data-baseweb="tab"]:hover {
+    color: var(--color-fg) !important;
+    background-color: transparent !important;
+}
+.stTabs [aria-selected="true"] {
+    color: var(--color-fg) !important;
+    border-bottom: 2px solid var(--color-fg) !important;
+    background-color: transparent !important;
+    font-weight: 600 !important;
+}
+.stTabs [data-baseweb="tab-highlight"] {
+    background-color: var(--color-fg) !important;
+    height: 2px !important;
+}
+.stTabs [data-baseweb="tab-panel"] {
+    padding-top: 24px !important;
+}
+
+/* ── Progress ─────────────────────────────────────────── */
+[data-testid="stProgress"] > div {
+    background-color: var(--color-border) !important;
+    border-radius: var(--radius-full) !important;
+    height: 4px !important;
+}
+[data-testid="stProgress"] > div > div {
+    background-color: var(--color-fg) !important;
+    border-radius: var(--radius-full) !important;
+}
+
+/* ── Alerts ───────────────────────────────────────────── */
+[data-testid="stAlert"] {
+    border-radius: var(--radius-md) !important;
+    font-size: 13px !important;
+    border-width: 0.5px !important;
+    border-style: solid !important;
+    box-shadow: none !important;
+}
+
+/* ── Dividers ─────────────────────────────────────────── */
+hr {
+    border: none !important;
+    border-top: 0.5px solid var(--color-border) !important;
+    margin: 24px 0 !important;
+}
+
+/* ── Code ─────────────────────────────────────────────── */
+code, .stCode code {
+    font-family: var(--font-mono) !important;
+    font-size: 12px !important;
+    background-color: var(--color-surface) !important;
+    border-radius: var(--radius-sm) !important;
+    padding: 2px 6px !important;
+    color: var(--color-ink) !important;
+    border: 0.5px solid var(--color-border) !important;
+}
+pre, .stCode pre {
+    background-color: var(--color-surface) !important;
+    border-radius: var(--radius-md) !important;
+    padding: 12px 16px !important;
+    border: 0.5px solid var(--color-border) !important;
+}
+pre code { border: none !important; padding: 0 !important; }
+
+/* ── Dataframe / Table ────────────────────────────────── */
+[data-testid="stDataFrame"],
+[data-testid="stDataEditor"] {
+    border: 0.5px solid var(--color-border) !important;
+    border-radius: var(--radius-md) !important;
+    overflow: hidden !important;
+}
+
+/* ── File uploader ────────────────────────────────────── */
+[data-testid="stFileUploader"] > div {
+    border: 0.5px dashed var(--color-border) !important;
+    border-radius: var(--radius-md) !important;
+    background-color: var(--color-surface) !important;
+    transition: border-color var(--dur-base) var(--ease) !important;
+}
+[data-testid="stFileUploader"] > div:hover {
+    border-color: #C4C4C0 !important;
+}
+
+/* ── Slider ───────────────────────────────────────────── */
+[data-testid="stSlider"] [data-baseweb="slider"] [role="slider"] {
+    background-color: var(--color-fg) !important;
+    border-color: var(--color-fg) !important;
+}
+[data-testid="stSlider"] [data-baseweb="slider"] [data-testid="stThumbValue"] {
+    color: var(--color-fg) !important;
+}
+
+/* ── Status widget ────────────────────────────────────── */
+[data-testid="stStatusWidget"] {
+    border: 0.5px solid var(--color-border) !important;
+    border-radius: var(--radius-md) !important;
+    font-size: 13px !important;
+}
+
+/* ── Spinner ──────────────────────────────────────────── */
+[data-testid="stSpinner"] p {
+    color: var(--color-muted) !important;
+    font-size: 13px !important;
+}
 
 /* ── Status text ──────────────────────────────────────── */
-.pass { color: #28a745; font-weight: bold; }
-.fail { color: #dc3545; font-weight: bold; }
-.err  { color: #ffc107; font-weight: bold; }
+.pass { color: #166534; font-weight: 600; }
+.fail { color: #991B1B; font-weight: 600; }
+.err  { color: #92400E; font-weight: 600; }
 
 /* ── Ambiguity badge ──────────────────────────────────── */
 .ambiguous-badge {
-    background: #fff3cd; color: #856404;
-    padding: 2px 8px; border-radius: 4px;
-    font-size: 0.78em; font-weight: bold;
+    background: #FFFBEB;
+    color: #92400E;
+    padding: 2px 8px;
+    border-radius: var(--radius-full, 9999px);
+    font-size: 11px;
+    font-weight: 500;
+    border: 0.5px solid #FDE68A;
 }
 
 /* ── Result card header ───────────────────────────────── */
@@ -96,34 +459,52 @@ st.markdown("""
     display: flex; align-items: center; gap: 10px;
     padding: 4px 0 8px 0;
 }
-.rc-title { font-size: 1.05em; font-weight: 700; flex: 1; }
-.rc-time   { font-size: 0.85em; color: #6c757d; white-space: nowrap; }
+.rc-title { font-size: 14px; font-weight: 700; flex: 1; }
+.rc-time  { font-size: 12px; color: var(--color-muted); white-space: nowrap; }
 
 /* ── Inline badge chips ───────────────────────────────── */
 .badge {
     display: inline-block;
-    padding: 2px 9px; border-radius: 99px;
-    font-size: 0.74em; font-weight: 700;
-    margin-left: 4px; vertical-align: middle;
+    padding: 2px 10px;
+    border-radius: 9999px;
+    font-size: 11px;
+    font-weight: 500;
+    letter-spacing: 0.01em;
+    margin-left: 4px;
+    vertical-align: middle;
 }
-.badge-pass    { background:#d4edda; color:#155724; }
-.badge-fail    { background:#f8d7da; color:#721c24; }
-.badge-error   { background:#fff3cd; color:#856404; }
-.badge-timeout { background:#e2e3e5; color:#383d41; }
-.badge-assert  { background:#cce5ff; color:#004085; }
-.badge-sel     { background:#e8d5f7; color:#4a1472; }
-.badge-network { background:#f8d7da; color:#721c24; }
-.badge-auth    { background:#ffe8cc; color:#7d3d00; }
-.badge-flaky   { background:#fff3cd; color:#856404; }
-.badge-retry   { background:#e2e3e5; color:#383d41; }
+.badge-pass    { background: #F0FDF4; color: #166534; border: 0.5px solid #BBF7D0; }
+.badge-fail    { background: #FEF2F2; color: #991B1B; border: 0.5px solid #FECACA; }
+.badge-error   { background: #FFFBEB; color: #92400E; border: 0.5px solid #FDE68A; }
+.badge-timeout { background: var(--color-surface); color: #374151; border: 0.5px solid var(--color-border); }
+.badge-assert  { background: #EFF6FF; color: #1E40AF; border: 0.5px solid #BFDBFE; }
+.badge-sel     { background: #F5F3FF; color: #4C1D95; border: 0.5px solid #DDD6FE; }
+.badge-network { background: #FEF2F2; color: #991B1B; border: 0.5px solid #FECACA; }
+.badge-auth    { background: #FFF7ED; color: #9A3412; border: 0.5px solid #FED7AA; }
+.badge-flaky   { background: #FFFBEB; color: #92400E; border: 0.5px solid #FDE68A; }
+.badge-retry   { background: var(--color-surface); color: #374151; border: 0.5px solid var(--color-border); }
 
 /* ── KPI card strip ───────────────────────────────────── */
-.kpi-label { font-size: 0.78em; color: #6c757d; text-transform: uppercase; letter-spacing:.05em; }
-.kpi-value { font-size: 1.9em; font-weight: 800; line-height: 1.15; }
-.kpi-delta { font-size: 0.82em; }
+.kpi-label { font-size: 11px; color: var(--color-muted); text-transform: uppercase; letter-spacing: .06em; font-weight: 500; }
+.kpi-value { font-size: 30px; font-weight: 700; line-height: 1.15; letter-spacing: -0.02em; color: var(--color-fg); }
+.kpi-delta { font-size: 12px; color: var(--color-muted); }
 
 /* ── Flaky indicator ──────────────────────────────────── */
-.flaky-row { background: #fffbeb; border-radius: 4px; padding: 2px 0; }
+.flaky-row { background: #FFFBEB; border-radius: var(--radius-sm); padding: 2px 0; }
+
+/* ── Sidebar subheaders ───────────────────────────────── */
+[data-testid="stSidebar"] .stMarkdown h3,
+[data-testid="stSidebar"] [data-testid="stMarkdownContainer"] h3 {
+    font-size: 11px !important;
+    font-weight: 500 !important;
+    text-transform: uppercase !important;
+    letter-spacing: 0.06em !important;
+    color: var(--color-muted) !important;
+    margin-top: 20px !important;
+    margin-bottom: 8px !important;
+    border-bottom: 0.5px solid var(--color-border) !important;
+    padding-bottom: 6px !important;
+}
 </style>
 """, unsafe_allow_html=True)
 
@@ -131,8 +512,9 @@ st.markdown("""
 _init_state()
 
 # ── UX constants ──────────────────────────────────────────────────────────
-_STATUS_ICON  = {"passed": "✅", "failed": "❌", "error": "⚠️", "running": "⏳"}
-_STATUS_COLOR = {"passed": "#28a745", "failed": "#dc3545", "error": "#fd7e14", "running": "#0d6efd"}
+# Material Symbol names per status (used for both :material/…: markdown and HTML spans)
+_STATUS_MICON = {"passed": "check_circle", "failed": "cancel", "error": "warning", "running": "hourglass_empty"}
+_STATUS_COLOR = {"passed": "#166534", "failed": "#991B1B", "error": "#92400E", "running": "#1E40AF"}
 _ERR_BADGE_CLASS = {
     "timeout":   "badge-timeout",
     "assertion": "badge-assert",
@@ -145,6 +527,25 @@ ASSERTION_ACTIONS = {
     "check_url", "check_text", "check_element",
     "check_attribute", "check_count",
 }
+
+
+# ── Icon helpers ───────────────────────────────────────────────────────────
+
+def _icon(name: str, size: int = 18, color: str | None = None) -> str:
+    """Material Symbol as an inline HTML span — for use inside unsafe_allow_html blocks."""
+    style = f"font-size:{size}px"
+    if color:
+        style += f";color:{color}"
+    return f'<span class="msi" style="{style}">{name}</span>'
+
+
+def _mi(name: str) -> str:
+    """Material Symbol token for Streamlit-native markdown/labels (headers, buttons, tabs…)."""
+    return f":material/{name}:"
+
+
+def _status_micon(status: str, size: int = 20) -> str:
+    return _icon(_STATUS_MICON.get(status, "help"), size=size, color=_STATUS_COLOR.get(status, "#6B7280"))
 
 
 # ── UI helpers ─────────────────────────────────────────────────────────────
@@ -176,16 +577,16 @@ def _status_badges_html(ex) -> str:
     if ex.error_type:
         parts.append(f'<span class="badge {css}">{ex.error_type}</span>')
     if getattr(ex, "attempts", 1) > 1:
-        parts.append(f'<span class="badge badge-retry">⟳ {ex.attempts} tries</span>')
+        parts.append(f'<span class="badge badge-retry">{_icon("autorenew", 13)} {ex.attempts} tries</span>')
     vv = getattr(ex, "vision_verdict", None)
     if vv and not vv.get("passed", True):
-        parts.append('<span class="badge badge-error">👁 vision fail</span>')
+        parts.append(f'<span class="badge badge-error">{_icon("visibility", 13)} vision fail</span>')
     return "".join(parts)
 
 
 def _render_result_card(ex, tc_title: str = "") -> None:
-    icon  = _STATUS_ICON.get(ex.status, "❓")
-    color = _STATUS_COLOR.get(ex.status, "#6c757d")
+    icon  = _status_micon(ex.status, size=20)
+    color = _STATUS_COLOR.get(ex.status, "#6B7280")
     t     = f"{ex.execution_time:.2f}s" if ex.execution_time is not None else "—"
     label = tc_title or ex.test_case_id
     vlab  = f" · {ex.variation_label}" if getattr(ex, "variation_label", None) else ""
@@ -194,21 +595,21 @@ def _render_result_card(ex, tc_title: str = "") -> None:
     with st.container(border=True):
         st.markdown(
             f'<div class="rc-header">'
-            f'  <span style="font-size:1.25em">{icon}</span>'
+            f'  {icon}'
             f'  <span class="rc-title" style="color:{color}">{ex.status.upper()}'
-            f'    <span style="color:#212529;font-weight:500;font-size:0.88em"> — {label}{vlab}</span>'
+            f'    <span style="color:#1A1A1A;font-weight:500;font-size:0.88em"> — {label}{vlab}</span>'
             f'  </span>'
             f'  {badges}'
-            f'  <span class="rc-time">⏱ {t}</span>'
+            f'  <span class="rc-time">{_icon("schedule", 14, "#6B7280")} {t}</span>'
             f'</div>',
             unsafe_allow_html=True,
         )
         _render_error_message(ex)
         vv = getattr(ex, "vision_verdict", None)
         if vv:
-            v_icon = "✅" if vv.get("passed") else "❌"
+            v_icon = _mi("check_circle") if vv.get("passed") else _mi("cancel")
             conf   = vv.get("confidence", 0)
-            st.caption(f"👁 Vision: {v_icon} confidence {conf:.0%} — {vv.get('explanation','')}")
+            st.caption(f"{_mi('visibility')} Vision: {v_icon} confidence {conf:.0%} — {vv.get('explanation','')}")
         if ex.screenshots:
             visible = [s for s in ex.screenshots if os.path.exists(s)]
             if visible:
@@ -269,7 +670,7 @@ try:
     workflow = _get_workflow()
     report_svc = _get_report_service()
     if db is None and DatabaseManager.is_configured():
-        st.warning("⚠️ DB connection failed (history disabled).")
+        st.warning("DB connection failed (history disabled).", icon=":material/warning:")
     st.session_state.ready = True
 except Exception as e:
     st.error(f"Initialisation error: {e}")
@@ -277,7 +678,7 @@ except Exception as e:
 
 # ── Sidebar ────────────────────────────────────────────────────────────────
 with st.sidebar:
-    st.header("⚙️ Configuration")
+    st.header(f"{_mi('settings')} Configuration")
 
     # ── Application URL ───────────────────────────────────────────────────
     st.subheader("Application")
@@ -292,19 +693,19 @@ with st.sidebar:
     if base_url:
         col_dom, col_ping = st.columns(2)
         with col_ping:
-            if st.button("🌐 Test URL", help="Send a quick HEAD request to verify the URL is reachable before running tests"):
+            if st.button(f"{_mi('language')} Test URL", help="Send a quick HEAD request to verify the URL is reachable before running tests"):
                 with st.spinner("Checking…"):
                     try:
                         import requests as _requests
                         resp = _requests.head(base_url, timeout=8, allow_redirects=True)
                         if resp.status_code < 400:
-                            st.success(f"✅ Reachable ({resp.status_code})")
+                            st.success(f"Reachable ({resp.status_code})", icon=":material/check_circle:")
                         else:
-                            st.warning(f"⚠️ HTTP {resp.status_code} — site may require auth or redirect")
+                            st.warning(f"HTTP {resp.status_code} — site may require auth or redirect", icon=":material/warning:")
                     except Exception as ping_err:
-                        st.error(f"❌ Unreachable: {ping_err}")
+                        st.error(f"Unreachable: {ping_err}", icon=":material/error:")
         with col_dom:
-            if st.button("🔍 Inspect DOM", help="Navigate to the app and extract real CSS selectors"):
+            if st.button(f"{_mi('search')} Inspect DOM", help="Navigate to the app and extract real CSS selectors"):
                 with st.spinner("Inspecting live app DOM…"):
                     try:
                         snapshot = inspect_dom(
@@ -329,7 +730,7 @@ with st.sidebar:
 
         snap = state.dom_snapshot
         if snap and not snap.get("error"):
-            with st.expander("📋 DOM Snapshot", expanded=False):
+            with st.expander(f"{_mi('content_paste')} DOM Snapshot", expanded=False):
                 st.caption(f"URL: {snap.get('url', '')}")
                 st.caption(f"Title: {snap.get('title', '')}")
                 inputs = snap.get("inputs", [])
@@ -432,26 +833,31 @@ with st.sidebar:
         )
 
     # ── Rate limit indicator ───────────────────────────────────────────────
-    st.subheader("📊 Session Usage")
+    st.subheader(f"{_mi('bar_chart')} Session Usage")
     used = workflow.api_call_count if st.session_state.get("ready") else 0
     cap  = config.MAX_API_CALLS_PER_SESSION
     pct  = min(used / cap, 1.0) if cap else 0
     st.progress(pct, text=f"API calls: {used} / {cap}")
     if used >= cap:
-        st.error("⛔ Session API call limit reached. Refresh the page to reset.")
+        st.error("Session API call limit reached. Refresh the page to reset.", icon=":material/block:")
     elif used >= cap * 0.8:
-        st.warning(f"⚠️ Approaching API call limit ({used}/{cap}).")
+        st.warning(f"Approaching API call limit ({used}/{cap}).", icon=":material/warning:")
 
 
 # ── Main ───────────────────────────────────────────────────────────────────
-st.title("🧪 QA Test Agent")
-st.caption("Automated testing powered by Claude AI and Playwright")
+st.markdown(
+    '<p style="font-size:11px;font-weight:500;text-transform:uppercase;letter-spacing:.06em;'
+    'color:#6B7280;margin-bottom:4px">QA Infrastructure</p>',
+    unsafe_allow_html=True,
+)
+st.title("QA Test Agent")
+st.caption("Automated browser testing powered by Claude AI and Playwright")
 
 if not st.session_state.get("ready"):
     st.stop()
 
 # ── Top-level tabs ─────────────────────────────────────────────────────────
-main_tab, history_tab = st.tabs(["🧪 Test Agent", "🗂️ Run History"])
+main_tab, history_tab = st.tabs([f"{_mi('science')} Test Agent", f"{_mi('folder')} Run History"])
 
 # ═══════════════════════════════════════════════════════════════════════════
 # TAB 1 — Test Agent (main workflow)
@@ -459,8 +865,8 @@ main_tab, history_tab = st.tabs(["🧪 Test Agent", "🗂️ Run History"])
 with main_tab:
 
     # ── Step 1: Input requirements ─────────────────────────────────────────
-    st.header("1️⃣ Requirements")
-    tab1, tab2, tab3 = st.tabs(["📄 Upload", "📝 Paste", "⚡ Sample"])
+    st.header(f"{_mi('counter_1')} Requirements")
+    tab1, tab2, tab3 = st.tabs([f"{_mi('upload_file')} Upload", f"{_mi('edit_note')} Paste", f"{_mi('bolt')} Sample"])
 
     with tab1:
         files = st.file_uploader(
@@ -518,7 +924,7 @@ Criteria: Dashboard loads after successful login.
     if state.requirements:
         col_req, col_amb = st.columns([3, 1])
         with col_amb:
-            if st.button("🔎 Check Ambiguity", help="Score each requirement for clarity and testability"):
+            if st.button(f"{_mi('search')} Check Ambiguity", help="Score each requirement for clarity and testability"):
                 with st.spinner("Analysing requirement clarity…"):
                     try:
                         state.ambiguity_scores = workflow.flag_ambiguous_requirements(state.requirements)
@@ -533,7 +939,7 @@ Criteria: Dashboard loads after successful login.
             is_ambiguous = score < 0.7
 
             badge = (
-                f' <span class="ambiguous-badge">⚠️ Ambiguous ({score:.0%})</span>'
+                f' <span class="ambiguous-badge">{_icon("warning", 12)} Ambiguous ({score:.0%})</span>'
                 if is_ambiguous else ""
             )
             label = f"**{req.title}** ({req.id}){badge}"
@@ -547,7 +953,7 @@ Criteria: Dashboard loads after successful login.
                     if amb.get("issues"):
                         st.warning("**Issues found:** " + " · ".join(amb["issues"]))
                     if amb.get("suggestion"):
-                        st.info(f"💡 **Suggestion:** {amb['suggestion']}")
+                        st.info(f"**Suggestion:** {amb['suggestion']}", icon=":material/lightbulb:")
                     clarity_key = f"clarify_{req.id}"
                     existing    = state.clarifications.get(req.id, "")
                     new_text    = st.text_area(
@@ -562,7 +968,7 @@ Criteria: Dashboard loads after successful login.
     # ── REQ 11 — Optional Design Asset Upload ─────────────────────────────
     if state.requirements:
         st.markdown("---")
-        with st.expander("🎨 Design Assets (Optional — REQ 11)", expanded=False):
+        with st.expander(f"{_mi('palette')} Design Assets (Optional — REQ 11)", expanded=False):
             st.caption(
                 "Upload a screenshot or mockup of your app's UI. Claude will analyse it against "
                 "your requirements and inject visual validation steps into generated tests."
@@ -572,7 +978,7 @@ Criteria: Dashboard loads after successful login.
             )
             figma_url = st.text_input("Or paste a Figma/image URL", placeholder="https://…", key="figma_url")
 
-            if st.button("🔍 Analyse Design", key="analyse_design"):
+            if st.button(f"{_mi('search')} Analyse Design", key="analyse_design"):
                 image_b64  = None
                 media_type = "image/png"
                 with st.spinner("Analysing design asset…"):
@@ -607,14 +1013,14 @@ Criteria: Dashboard loads after successful login.
                         st.error(f"Design analysis failed: {e}")
 
             if state.design_context:
-                st.success("✅ Design context ready — will be injected into next test generation.")
+                st.success("Design context ready — will be injected into next test generation.", icon=":material/check_circle:")
                 if st.button("Clear design context", key="clear_design"):
                     state.design_context       = None
                     state.design_discrepancies = []
 
     # ── REQ 10.3 — External test data upload ──────────────────────────────
     if state.requirements:
-        with st.expander("📂 External Test Data (Optional — REQ 10.3)", expanded=False):
+        with st.expander(f"{_mi('folder_open')} External Test Data (Optional — REQ 10.3)", expanded=False):
             st.caption("Upload a CSV or JSON file with test data rows. Each row will be used as a variation.")
             td_file = st.file_uploader("Upload CSV or JSON", type=["csv", "json"], key="testdata_upload")
             if td_file:
@@ -641,7 +1047,7 @@ Criteria: Dashboard loads after successful login.
 
     # ── REQ 10.4 — Custom assertions ─────────────────────────────────────
     if state.requirements:
-        with st.expander("✏️ Custom Assertion Rules (Optional — REQ 10.4)", expanded=False):
+        with st.expander(f"{_mi('edit')} Custom Assertion Rules (Optional — REQ 10.4)", expanded=False):
             st.caption(
                 "Add custom text or attribute assertions. These are injected as `check_text` / "
                 "`check_attribute` steps into every generated test case."
@@ -649,7 +1055,7 @@ Criteria: Dashboard loads after successful login.
             new_rule_text = st.text_input(
                 "Assertion rule", placeholder='e.g. "Welcome" or "aria-label=Submit"', key="custom_assert_input"
             )
-            if st.button("➕ Add Rule", key="add_custom_assert"):
+            if st.button(f"{_mi('add')} Add Rule", key="add_custom_assert"):
                 rule = new_rule_text.strip()
                 if rule and rule not in state.custom_assertions:
                     state.custom_assertions.append(rule)
@@ -660,36 +1066,36 @@ Criteria: Dashboard loads after successful login.
                 for i, rule in enumerate(state.custom_assertions):
                     c1, c2 = st.columns([5, 1])
                     c1.code(rule, language=None)
-                    if c2.button("✕", key=f"remove_rule_{i}"):
+                    if c2.button(_mi("close"), key=f"remove_rule_{i}"):
                         to_remove.append(rule)
                 for r in to_remove:
                     state.custom_assertions.remove(r)
 
     # ── Step 2: Generate test cases ────────────────────────────────────────
     if state.requirements:
-        st.header("2️⃣ Generate Test Cases")
+        st.header(f"{_mi('counter_2')} Generate Test Cases")
         max_tc = st.slider("Max test cases", 1, 10, 5)
 
         snap = state.dom_snapshot
         if snap and not snap.get("error"):
             st.info(
-                f"🔍 DOM snapshot available ({len(snap.get('inputs', []))} inputs, "
+                f"DOM snapshot available ({len(snap.get('inputs', []))} inputs, "
                 f"{len(snap.get('buttons', []))} buttons) — real selectors will be injected."
             )
         elif base_url:
-            st.caption("💡 Tip: Click **Inspect DOM** in the sidebar to inject real selectors and reduce selector failures.")
+            st.caption(f"{_mi('lightbulb')} Tip: Click **Inspect DOM** in the sidebar to inject real selectors and reduce selector failures.")
 
         if state.design_context:
-            st.info("🎨 Design context will be injected into test generation.")
+            st.info("Design context will be injected into test generation.", icon=":material/palette:")
         if state.custom_assertions:
-            st.info(f"✏️ {len(state.custom_assertions)} custom assertion rule(s) will be appended to every test.")
+            st.info(f"{len(state.custom_assertions)} custom assertion rule(s) will be appended to every test.", icon=":material/edit:")
         if state.external_test_data:
-            st.info(f"📂 {len(state.external_test_data)} external data row(s) loaded — will be used as variations.")
+            st.info(f"{len(state.external_test_data)} external data row(s) loaded — will be used as variations.", icon=":material/folder_open:")
 
         _limit_hit = workflow.rate_limit_exceeded()
         if _limit_hit:
-            st.error("⛔ Session API call limit reached. Refresh the page to generate more test cases.")
-        if st.button("🧪 Generate Test Cases", type="primary", width="stretch", disabled=_limit_hit):
+            st.error("Session API call limit reached. Refresh the page to generate more test cases.", icon=":material/block:")
+        if st.button(f"{_mi('science')} Generate Test Cases", type="primary", width="stretch", disabled=_limit_hit):
             if not state.generating:
                 state.generating = True
                 with st.spinner("Generating…"):
@@ -730,7 +1136,7 @@ Criteria: Dashboard loads after successful login.
 
     # ── Step 3: Test Management ────────────────────────────────────────────
     if state.test_cases:
-        st.header("3️⃣ Select & Manage Tests")
+        st.header(f"{_mi('counter_3')} Select & Manage Tests")
 
         _ALL_ACTIONS = sorted([
             "goto", "fill", "click", "check", "press",
@@ -755,7 +1161,7 @@ Criteria: Dashboard loads after successful login.
             return pd.DataFrame([
                 {
                     "#": i + 1,
-                    "Type": "🔍 Assert" if s.action in ASSERTION_ACTIONS else "▶ Action",
+                    "Type": "Assert" if s.action in ASSERTION_ACTIONS else "Action",
                     "Action": s.action,
                     "Selector": s.selector or "",
                     "Value": s.value or "",
@@ -784,24 +1190,24 @@ Criteria: Dashboard loads after successful login.
 
         tb1, tb2, tb3, tb4 = st.columns([2, 3, 2, 2])
         with tb1:
-            suite_filter = st.selectbox("📁 Suite", suite_opts, key="suite_filter")
+            suite_filter = st.selectbox(f"{_mi('folder')} Suite", suite_opts, key="suite_filter")
         with tb2:
             bulk_action = st.selectbox(
                 "Bulk action",
-                ["— select —", "✅ Approve selected", "🔄 Regenerate selected",
-                 "➕ Add step to selected", "🗑️ Delete selected"],
+                ["— select —", "Approve selected", "Regenerate selected",
+                 "Add step to selected", "Delete selected"],
                 key="bulk_action",
             )
         with tb3:
-            bulk_apply = st.button("▶ Apply", key="bulk_apply_btn", use_container_width=True)
+            bulk_apply = st.button(f"{_mi('play_arrow')} Apply", key="bulk_apply_btn", use_container_width=True)
         with tb4:
-            if st.button("➕ New test", key="new_test_btn", use_container_width=True):
+            if st.button(f"{_mi('add')} New test", key="new_test_btn", use_container_width=True):
                 state.show_create_form = not state.show_create_form
 
         # ── Create-test form ─────────────────────────────────────────────────
         if state.show_create_form:
             with st.container(border=True):
-                st.subheader("✏️ Create test manually")
+                st.subheader(f"{_mi('edit')} Create test manually")
                 cf1, cf2 = st.columns(2)
                 with cf1:
                     new_title  = st.text_input("Title *", key="new_tc_title",
@@ -829,7 +1235,7 @@ Criteria: Dashboard loads after successful login.
 
                 cfa, cfb = st.columns(2)
                 with cfa:
-                    if st.button("💾 Save test", key="save_new_tc", type="primary"):
+                    if st.button(f"{_mi('save')} Save test", key="save_new_tc", type="primary"):
                         if not new_title.strip():
                             st.error("Title is required.")
                         else:
@@ -854,14 +1260,14 @@ Criteria: Dashboard loads after successful login.
                             st.success(f"Created {tc_id} — {new_title.strip()}")
                             st.rerun()
                 with cfb:
-                    if st.button("✕ Cancel", key="cancel_new_tc"):
+                    if st.button(f"{_mi('close')} Cancel", key="cancel_new_tc"):
                         state.show_create_form = False
                         st.rerun()
 
         # ── Bulk add-step form ────────────────────────────────────────────────
         if state.show_bulk_step_form:
             with st.container(border=True):
-                st.subheader("➕ Add step to selected tests")
+                st.subheader(f"{_mi('add')} Add step to selected tests")
                 bs1, bs2, bs3 = st.columns([2, 2, 2])
                 with bs1:
                     bs_action = st.selectbox("Action", _ALL_ACTIONS, key="bulk_step_action")
@@ -888,7 +1294,7 @@ Criteria: Dashboard loads after successful login.
                     state.show_bulk_step_form = False
                     st.success(f"Step added to {len(targets)} test(s). Approval reset.")
                     st.rerun()
-                if bcanc_col.button("✕ Cancel", key="bulk_step_cancel"):
+                if bcanc_col.button(f"{_mi('close')} Cancel", key="bulk_step_cancel"):
                     state.show_bulk_step_form = False
                     st.rerun()
 
@@ -926,7 +1332,7 @@ Criteria: Dashboard loads after successful login.
                     for tc in list(state.test_cases):
                         if tc.id not in selected_now:
                             continue
-                        st.write(f"⏳ {tc.title}…")
+                        st.write(f"{_mi('hourglass_empty')} {tc.title}…")
                         new_tc, err = workflow.regenerate_one(
                             tc, state.requirements,
                             username_selector=u_sel, password_selector=p_sel,
@@ -936,9 +1342,9 @@ Criteria: Dashboard loads after successful login.
                         if new_tc:
                             idx = next(i for i, t in enumerate(state.test_cases) if t.id == tc.id)
                             state.test_cases[idx] = new_tc
-                            st.write(f"✅ {tc.title}")
+                            st.write(f"{_mi('check_circle')} {tc.title}")
                         else:
-                            st.write(f"❌ {tc.title}: {err}")
+                            st.write(f"{_mi('cancel')} {tc.title}: {err}")
                     _rstat.update(label="Bulk regeneration complete", state="complete", expanded=False)
                 st.rerun()
             elif "Add step" in bulk_action:
@@ -961,7 +1367,7 @@ Criteria: Dashboard loads after successful login.
 
             if len(sorted_suite_keys) > 1 or s_name != "Unsorted":
                 st.markdown(
-                    f"**📁 {s_name}** &nbsp;&nbsp;"
+                    f'{_icon("folder", 15)} <b>{s_name}</b> &nbsp;&nbsp;'
                     f'<span class="badge badge-pass">{n_approved} approved</span> '
                     f'<span class="badge badge-retry">{len(s_tcs) - n_approved} pending</span>',
                     unsafe_allow_html=True,
@@ -981,9 +1387,9 @@ Criteria: Dashboard loads after successful login.
 
                 with c_status:
                     if tc.approved:
-                        st.markdown('<span class="badge badge-pass">✅ approved</span>', unsafe_allow_html=True)
+                        st.markdown(f'<span class="badge badge-pass">{_icon("check_circle", 13)} approved</span>', unsafe_allow_html=True)
                     else:
-                        st.markdown('<span class="badge badge-error">⏳ pending</span>', unsafe_allow_html=True)
+                        st.markdown(f'<span class="badge badge-error">{_icon("hourglass_empty", 13)} pending</span>', unsafe_allow_html=True)
 
                 with c_title:
                     st.markdown(f"**{tc.title}** `{tc.id}`")
@@ -1000,16 +1406,16 @@ Criteria: Dashboard loads after successful login.
 
                 with c_approve:
                     if not tc.approved:
-                        if st.button("✅ Approve", key=f"approve_{tc.id}"):
+                        if st.button(f"{_mi('check_circle')} Approve", key=f"approve_{tc.id}"):
                             tc.approved = True
                             st.rerun()
                     else:
-                        if st.button("↩ Revoke", key=f"revoke_{tc.id}"):
+                        if st.button(f"{_mi('undo')} Revoke", key=f"revoke_{tc.id}"):
                             tc.approved = False
                             st.rerun()
 
                 with c_dup:
-                    if st.button("⊕", key=f"dup_{tc.id}", help="Duplicate"):
+                    if st.button(_mi("content_copy"), key=f"dup_{tc.id}", help="Duplicate"):
                         dup = copy.deepcopy(tc)
                         dup.id = f"TC-{uuid.uuid4().hex[:8].upper()}"
                         dup.title = f"{tc.title} (copy)"
@@ -1019,13 +1425,13 @@ Criteria: Dashboard loads after successful login.
                         st.rerun()
 
                 with c_del:
-                    if st.button("🗑", key=f"del_{tc.id}", help="Delete"):
+                    if st.button(_mi("delete"), key=f"del_{tc.id}", help="Delete"):
                         state.test_cases = [t for t in state.test_cases if t.id != tc.id]
                         if tc.id in selected_ids:
                             selected_ids.remove(tc.id)
                         st.rerun()
 
-                with st.expander(f"✏️ {tc.title}", expanded=False):
+                with st.expander(f"{_mi('edit')} {tc.title}", expanded=False):
                     edited = st.data_editor(
                         _steps_to_df(tc),
                         key=f"editor_{tc.id}",
@@ -1036,7 +1442,7 @@ Criteria: Dashboard loads after successful login.
 
                     ep1, ep2 = st.columns(2)
                     with ep1:
-                        if st.button(f"💾 Apply edits", key=f"apply_{tc.id}"):
+                        if st.button(f"{_mi('save')} Apply edits", key=f"apply_{tc.id}"):
                             new_steps = _df_to_steps(edited)
                             if new_steps:
                                 tc.steps    = new_steps
@@ -1045,7 +1451,7 @@ Criteria: Dashboard loads after successful login.
                             else:
                                 st.warning("No valid steps.")
                     with ep2:
-                        if st.button(f"🔄 Regenerate", key=f"regen_{tc.id}"):
+                        if st.button(f"{_mi('refresh')} Regenerate", key=f"regen_{tc.id}"):
                             with st.spinner("Regenerating…"):
                                 new_tc, err = workflow.regenerate_one(
                                     tc, state.requirements,
@@ -1089,11 +1495,12 @@ Criteria: Dashboard loads after successful login.
         if pending_sel:
             pw_col, pa_col = st.columns([3, 1])
             pw_col.warning(
-                f"⚠️ **{len(pending_sel)} selected test(s) not yet approved** — "
-                "only approved tests will be executed."
+                f"**{len(pending_sel)} selected test(s) not yet approved** — "
+                "only approved tests will be executed.",
+                icon=":material/warning:",
             )
             with pa_col:
-                if st.button("✅ Approve all selected", key="approve_all_sel", use_container_width=True):
+                if st.button(f"{_mi('check_circle')} Approve all selected", key="approve_all_sel", use_container_width=True):
                     for tc in state.test_cases:
                         if tc.id in selected_ids:
                             tc.approved = True
@@ -1106,14 +1513,14 @@ Criteria: Dashboard loads after successful login.
             ab1, ab2 = st.columns(2)
             with ab1:
                 run_btn = st.button(
-                    f"▶️ Run Approved ({len(run_ids)})",
+                    f"{_mi('play_arrow')} Run Approved ({len(run_ids)})",
                     type="primary",
                     use_container_width=True,
                     disabled=len(run_ids) == 0,
                 )
             with ab2:
                 report_btn = st.button(
-                    "📄 Generate Report",
+                    f"{_mi('description')} Generate Report",
                     use_container_width=True,
                     disabled=len(state.executions) == 0,
                 )
@@ -1136,7 +1543,7 @@ Criteria: Dashboard loads after successful login.
                 completed = 0
                 passed_so_far = 0
 
-                with st.status("🚀 Running tests…", expanded=True) as run_status:
+                with st.status(f"{_mi('rocket_launch')} Running tests…", expanded=True) as run_status:
                     prog = st.progress(0.0)
                     for tc, result in executor.iter_run(
                         to_run, use_variations=use_variations, vision_fn=vision_fn
@@ -1145,7 +1552,7 @@ Criteria: Dashboard loads after successful login.
                         completed += 1
                         if result.status == "passed":
                             passed_so_far += 1
-                        icon = _STATUS_ICON.get(result.status, "❓")
+                        icon = _mi(_STATUS_MICON.get(result.status, "help"))
                         vlab = f" [{result.variation_label}]" if getattr(result, "variation_label", None) else ""
                         t    = f"{result.execution_time:.1f}s" if result.execution_time else ""
                         st.write(f"{icon} {tc.title}{vlab}  {t}")
@@ -1153,7 +1560,7 @@ Criteria: Dashboard loads after successful login.
 
                     failed_count = completed - passed_so_far
                     label = (
-                        f"✅ All {completed} tests passed"
+                        f"{_mi('check_circle')} All {completed} tests passed"
                         if failed_count == 0
                         else f"Done — {passed_so_far}/{completed} passed, {failed_count} failed"
                     )
@@ -1177,7 +1584,7 @@ Criteria: Dashboard loads after successful login.
                         )
                         if new_run_id:
                             state.db_run_id = new_run_id
-                        st.info("💾 Results saved to database.")
+                        st.info("Results saved to database.", icon=":material/save:")
                     except Exception as db_err:
                         st.warning(f"DB save failed: {db_err}")
 
@@ -1191,21 +1598,21 @@ Criteria: Dashboard loads after successful login.
                             try:
                                 report_svc.save_to_db(state.db_run_id, report)
                             except Exception as db_err:
-                                st.warning(f"⚠️ DB report save failed: {db_err}")
+                                st.warning(f"DB report save failed: {db_err}", icon=":material/warning:")
                         st.success("Report ready")
                     except Exception as e:
                         st.error(str(e))
 
     # ── Step 4: Results ────────────────────────────────────────────────────
     if state.executions:
-        st.header("4️⃣ Results")
+        st.header(f"{_mi('counter_4')} Results")
         m = get_metrics(state.executions)
 
         k1, k2, k3, k4, k5 = st.columns(5)
         k1.metric("Total",      m["total_executions"])
-        k2.metric("Passed ✅",  m["passed"])
-        k3.metric("Failed ❌",  m["failed"])
-        k4.metric("Errors ⚠️", m["errors"])
+        k2.metric("Passed",  m["passed"])
+        k3.metric("Failed",  m["failed"])
+        k4.metric("Errors", m["errors"])
         k5.metric("Pass Rate",  f"{m['pass_rate']:.1f}%")
 
         execs = state.executions
@@ -1236,7 +1643,7 @@ Criteria: Dashboard loads after successful login.
         if flaky_in_session:
             tc_map = {tc.id: tc.title for tc in state.test_cases}
             st.warning(
-                f"⚠️ **{len(flaky_in_session)} test(s) needed retries** — possible flakiness: "
+                f"**{len(flaky_in_session)} test(s) needed retries** — possible flakiness: "
                 + ", ".join(
                     f"`{tc_map.get(e.test_case_id, e.test_case_id)}`"
                     for e in flaky_in_session
@@ -1255,7 +1662,7 @@ Criteria: Dashboard loads after successful login.
             for tc_id, group_execs in groups.items():
                 g_pass  = sum(1 for e in group_execs if e.status == "passed")
                 g_total = len(group_execs)
-                g_icon  = "✅" if g_pass == g_total else "⚠️" if g_pass > 0 else "❌"
+                g_icon  = _mi("check_circle") if g_pass == g_total else _mi("warning") if g_pass > 0 else _mi("cancel")
                 title   = tc_title_map.get(tc_id, tc_id)
                 with st.expander(f"{g_icon} {title} — {g_pass}/{g_total} passed", expanded=True):
                     for ex in group_execs:
@@ -1266,11 +1673,11 @@ Criteria: Dashboard loads after successful login.
 
     # ── Step 5: Report ─────────────────────────────────────────────────────
     if state.report:
-        st.header("5️⃣ Report")
+        st.header(f"{_mi('counter_5')} Report")
         report = state.report["data"]
         ts = datetime.now().strftime('%Y%m%d_%H%M%S')
 
-        report_tabs = st.tabs(["📋 Summary", "🗺️ Traceability Matrix"])
+        report_tabs = st.tabs([f"{_mi('description')} Summary", f"{_mi('map')} Traceability Matrix"])
 
         with report_tabs[0]:
             st.subheader("Summary")
@@ -1290,18 +1697,18 @@ Criteria: Dashboard loads after successful login.
             dl1, dl2, dl3 = st.columns(3)
             with dl1:
                 st.download_button(
-                    "💾 Download HTML", report.html_content,
+                    f"{_mi('download')} Download HTML", report.html_content,
                     file_name=f"report_{ts}.html", mime="text/html", width="stretch",
                 )
             with dl2:
                 st.download_button(
-                    "📊 Download CSV",
+                    f"{_mi('download')} Download CSV",
                     report_svc.export_csv(state.executions, state.test_cases),
                     file_name=f"report_{ts}.csv", mime="text/csv", width="stretch",
                 )
             with dl3:
                 st.download_button(
-                    "🔖 Download JUnit XML",
+                    f"{_mi('download')} Download JUnit XML",
                     report_svc.export_junit(state.executions, state.test_cases),
                     file_name=f"report_{ts}.xml", mime="application/xml", width="stretch",
                 )
@@ -1315,7 +1722,7 @@ Criteria: Dashboard loads after successful login.
             )
             st.dataframe(df_matrix, hide_index=True, use_container_width=True)
             st.download_button(
-                "📥 Download Traceability CSV",
+                f"{_mi('download')} Download Traceability CSV",
                 df_matrix.to_csv(index=False),
                 file_name=f"traceability_{ts}.csv",
                 mime="text/csv",
@@ -1325,13 +1732,14 @@ Criteria: Dashboard loads after successful login.
 # TAB 2 — Run History & Analytics
 # ═══════════════════════════════════════════════════════════════════════════
 with history_tab:
-    st.header("🗂️ Run History & Analytics")
+    st.header(f"{_mi('folder')} Run History & Analytics")
 
     if not db:
         st.info("PostgreSQL not configured — run history is unavailable. Set DATABASE_URL to enable.")
     else:
         h_overview, h_trends, h_flaky, h_manage = st.tabs(
-            ["📊 Overview", "📈 Trends", "⚠️ Flaky Tests", "🗂️ Manage Runs"]
+            [f"{_mi('bar_chart')} Overview", f"{_mi('trending_up')} Trends",
+             f"{_mi('warning')} Flaky Tests", f"{_mi('folder')} Manage Runs"]
         )
 
         try:
@@ -1349,7 +1757,7 @@ with history_tab:
         # ── TAB: Overview ─────────────────────────────────────────────────
         with h_overview:
             if not _history:
-                st.info("No saved runs yet. Run some tests from the 🧪 Test Agent tab.")
+                st.info("No saved runs yet. Run some tests from the Test Agent tab.")
             else:
                 total_runs   = len(_history)
                 total_tests  = sum(r["total"]  for r in _history)
@@ -1418,7 +1826,7 @@ with history_tab:
             )
 
             if not _flaky_tests:
-                st.success("🎉 No flaky tests detected in the last 30 days.")
+                st.success("No flaky tests detected in the last 30 days.", icon=":material/celebration:")
             else:
                 flaky_df = pd.DataFrame(_flaky_tests)
                 flaky_df["Flaky Rate"] = flaky_df["flaky_rate"].apply(lambda x: f"{x:.0f}%")
@@ -1449,13 +1857,13 @@ with history_tab:
             mc1, mc2, mc3 = st.columns([3, 2, 1])
             with mc1:
                 search_query = st.text_input(
-                    "🔍 Search", placeholder="Filter by name or URL…", key="hist_search"
+                    f"{_mi('search')} Search", placeholder="Filter by name or URL…", key="hist_search"
                 )
             with mc2:
                 hist_limit = st.selectbox("Show last", [10, 25, 50, 100], index=1, key="hist_limit")
             with mc3:
                 st.write("")
-                st.button("🔄 Refresh", key="hist_refresh")
+                st.button(f"{_mi('refresh')} Refresh", key="hist_refresh")
 
             try:
                 history = db.list_runs(limit=hist_limit)
@@ -1502,13 +1910,13 @@ with history_tab:
                         qb.metric("Passed",    sr["passed"])
                         qc.metric("Pass Rate", f"{sr['pass_rate']:.0f}%")
                         st.markdown(
-                            f"📅 {sr['created_at'].strftime('%Y-%m-%d %H:%M') if sr['created_at'] else '—'}"
+                            f"{_mi('calendar_today')} {sr['created_at'].strftime('%Y-%m-%d %H:%M') if sr['created_at'] else '—'}"
                         )
 
                         r_col1, r_col2, r_col3 = st.columns(3)
 
                         with r_col1:
-                            if st.button("↩ Load into session", key="hist_load", type="primary"):
+                            if st.button(f"{_mi('restore')} Load into session", key="hist_load", type="primary"):
                                 with st.spinner("Loading run…"):
                                     run_data = db.load_run(selected_run["id"])
                                     state.requirements = run_data["requirements"]
@@ -1520,13 +1928,13 @@ with history_tab:
                                     )
                                     state.db_run_id = selected_run["id"]
                                     st.success(f"Loaded: {selected_run['name']}")
-                                    st.info("Switch to the 🧪 Test Agent tab to view the run.")
+                                    st.info("Switch to the Test Agent tab to view the run.")
 
                         with r_col2:
                             new_name = st.text_input(
                                 "Rename run", value=selected_run["name"], key="hist_rename_input"
                             )
-                            if st.button("✏️ Save name", key="hist_rename_btn"):
+                            if st.button(f"{_mi('save')} Save name", key="hist_rename_btn"):
                                 try:
                                     with db._connect() as conn:
                                         with conn.cursor() as cur:
@@ -1543,7 +1951,7 @@ with history_tab:
                             st.write("")
                             confirm_delete = st.checkbox("Confirm delete", key="hist_del_confirm")
                             if st.button(
-                                "🗑️ Delete run", key="hist_delete", disabled=not confirm_delete
+                                f"{_mi('delete')} Delete run", key="hist_delete", disabled=not confirm_delete
                             ):
                                 try:
                                     db.delete_run(selected_run["id"])
@@ -1556,5 +1964,8 @@ with history_tab:
             except Exception as manage_err:
                 st.error(f"History load error: {manage_err}")
 
-st.markdown("---")
-st.caption("Built with ❤️ by VG Platform")
+st.markdown(
+    '<hr style="border:none;border-top:0.5px solid #E8E8E4;margin:40px 0 16px 0"/>'
+    '<p style="font-size:12px;color:#6B7280;text-align:center">VG Platform — QA Test Agent</p>',
+    unsafe_allow_html=True,
+)

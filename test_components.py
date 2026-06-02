@@ -10,7 +10,7 @@ def test_imports():
     print("Testing imports...")
     
     try:
-        from config import config
+        from core.config import config
         print("✓ Config module loaded")
         
         from models import Requirement, TestCase, TestExecution, PlaywrightConfig
@@ -49,7 +49,7 @@ def test_config():
     print("\nTesting configuration...")
     
     try:
-        from config import config
+        from core.config import config
         
         # Test default values
         assert config.PLAYWRIGHT_TIMEOUT == 30000
@@ -93,7 +93,7 @@ def test_azure_storage():
     print("\nTesting Azure storage...")
     
     try:
-        from azure_storage import LocalStorageManager
+        from repositories.azure_storage import LocalStorageManager
         
         # Test local storage (since we don't have Azure configured)
         storage = LocalStorageManager()

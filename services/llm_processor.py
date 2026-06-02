@@ -9,7 +9,7 @@ from typing import List, Dict, Any, Optional
 from xml.etree import ElementTree as ET
 
 from anthropic import Anthropic
-from config import config
+from core.config import config
 from models import Requirement, TestCase, TestStep, TestReport
 
 logger = logging.getLogger(__name__)
@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 # Falls back through cheaper/faster models if the primary is unavailable.
 # claude-3-haiku-20240307 is DEPRECATED (retiring 2026-04-19) — removed.
 def _build_model_list() -> list[str]:
-    from config import get_secret
+    from core.config import get_secret
     primary = get_secret("CLAUDE_MODEL", "claude-haiku-4-5")
     fallbacks = [
         "claude-haiku-4-5",
@@ -1072,7 +1072,7 @@ Return ONLY raw JSON — no markdown, no code fences:
         self._track_call("generate_test_report")
 
         # Reuse get_metrics so we never duplicate the status-counting logic
-        from playwright_executor import get_metrics
+        from services.playwright_executor import get_metrics
         m         = get_metrics(executions)
         total     = m["total_executions"]
         passed    = m["passed"]

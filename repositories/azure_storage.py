@@ -3,7 +3,7 @@ import logging
 from datetime import datetime
 from typing import List, Optional
 from azure.storage.blob import BlobServiceClient, ContainerClient
-from config import config
+from core.config import config
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
