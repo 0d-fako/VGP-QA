@@ -1,0 +1,9 @@
+# Pin the Browserbase light theme so BaseWeb widgets (selectbox, dropdown menu,
+# inputs) resolve to dark-on-light regardless of the user's system dark mode.
+[theme]
+base = "light"
+primaryColor = "#000000"
+backgroundColor = "#FFFFFF"
+secondaryBackgroundColor = "#F5F5F4"
+textColor = "#1A1A1A"
+font = "sans serif"

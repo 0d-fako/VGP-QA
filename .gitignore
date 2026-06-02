@@ -25,6 +25,9 @@ ENV/
 screenshots/
 test_evidence/
 
+# User preferences (local, may contain machine-specific defaults)
+.qa_prefs.json
+
 # IDE / editor
 .idea/
 .vscode/

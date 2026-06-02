@@ -1,6 +1,11 @@
 import streamlit as st
 
 DEFAULTS: dict = {
+    # ── Navigation / wizard ──
+    "page":                 "Overview",   # active sidebar page
+    "wizard_step":          1,            # 1-6 within Run New Test
+    "wizard":               {},           # collected target/auth/coverage config (survives step nav)
+    # ── Workflow data ──
     "requirements":         [],
     "ambiguity_scores":     [],
     "test_cases":           [],
@@ -27,6 +32,22 @@ def init() -> None:
 
 
 class _AppState:
+    # ── Navigation / wizard ──
+    @property
+    def page(self): return st.session_state.page
+    @page.setter
+    def page(self, v): st.session_state.page = v
+
+    @property
+    def wizard_step(self): return st.session_state.wizard_step
+    @wizard_step.setter
+    def wizard_step(self, v): st.session_state.wizard_step = v
+
+    @property
+    def wizard(self): return st.session_state.wizard
+    @wizard.setter
+    def wizard(self, v): st.session_state.wizard = v
+
     @property
     def requirements(self): return st.session_state.requirements
     @requirements.setter
